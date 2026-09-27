@@ -8,7 +8,9 @@
  *
  * Easing equations are Robert Penner's as written in Godot's tween_easing.h (TRANS_* × EASE_*).
  * A Tween bound to a node stops when the node leaves the tree (Godot kills it on free).
+ * `finished` is a Signal emitted right after the last step, before the next tween is processed.
  */
+import { Signal } from './signal.js';
 
 export const TRANS = Object.freeze({ LINEAR: 0, SINE: 1, QUINT: 2, QUART: 3, QUAD: 4, EXPO: 5, ELASTIC: 6, CUBIC: 7, CIRC: 8, BOUNCE: 9, BACK: 10, SPRING: 11 });
 export const EASE = Object.freeze({ IN: 0, OUT: 1, IN_OUT: 2, OUT_IN: 3 });
@@ -395,7 +397,7 @@ export class Tween {
     this.valid = true;
     this.running = true;
     this._startedStep = -1;
-    this._finishedListeners = [];
+    this.finished = new Signal();
     registry.add(this);
   }
 
@@ -453,11 +455,6 @@ export class Tween {
   is_running() {
     return this.valid && this.running;
   }
-  /** Promise for `await tween.finished`. */
-  get finished() {
-    return new Promise((resolve) => this._finishedListeners.push(resolve));
-  }
-
   _targetGone(target) {
     return target && target._freed === true;
   }
@@ -492,7 +489,7 @@ export class Tween {
     this.valid = false;
     this.running = false;
     this.registry.delete(this);
-    for (const resolve of this._finishedListeners.splice(0)) resolve();
+    this.finished.emit();
     return false;
   }
 }

@@ -51,6 +51,8 @@ class InputMapClass {
     bind('ui_select', [KEY.SPACE], [JOY.Y]);
     bind('ui_cancel', [KEY.ESCAPE], [JOY.B]);
     bind('ui_focus_next', [KEY.TAB], []);
+    bind('ui_focus_prev', [KEY.TAB], []);
+    bind('ui_text_submit', [KEY.ENTER, KEY.KP_ENTER], []);
     bind('ui_up', [KEY.UP], [JOY.DPAD_UP]);
     bind('ui_down', [KEY.DOWN], [JOY.DPAD_DOWN]);
     bind('ui_left', [KEY.LEFT], [JOY.DPAD_LEFT]);
@@ -74,6 +76,7 @@ export class InputEvent {
       if (!action.keys.has(this.code)) return false;
       // Shift+Tab is Godot's ui_focus_prev, not ui_focus_next.
       if (name === 'ui_focus_next' && this.shift) return false;
+      if (name === 'ui_focus_prev' && !this.shift) return false;
       return true;
     }
     if (this.kind === 'joy_button') return action.buttons.has(this.button_index);
@@ -91,6 +94,17 @@ export class InputEvent {
   /** InputEventMouseButton.is_pressed() */
   is_pressed() {
     return Boolean(this.pressed);
+  }
+
+  is_echo() {
+    return Boolean(this.echo);
+  }
+
+  /** A copy positioned in another control's local space (GUI events are re-localised per control). */
+  at(position) {
+    const copy = new InputEvent(this.kind, { ...this });
+    copy.position = position;
+    return copy;
   }
 }
 

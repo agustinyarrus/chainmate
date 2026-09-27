@@ -33,7 +33,10 @@ export class Signal {
     }
   }
 
-  /** `await signal` */
+  /**
+   * A promise of the next emission, for tooling outside the frame loop (boot, e2e drivers). Ported
+   * game coroutines `yield` the signal instead, which resumes them inside the emission (coroutine.js).
+   */
   wait() {
     return new Promise((resolve) => this.connect((...args) => resolve(args), CONNECT_ONE_SHOT));
   }

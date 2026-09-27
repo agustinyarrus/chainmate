@@ -220,21 +220,37 @@ export class FontVariation {
     return { x: Math.ceil(shaped.width), y: Math.ceil(shaped.ascent + shaped.descent) };
   }
 
+  /** HarfBuzz font at scale = units per em (outlines and extents in font units). */
+  _units() {
+    if (!this._unitsFont) {
+      const hb = this.file.hb;
+      this._unitsFont = new hb.Font(this.file.face);
+      this._unitsFont.setVariations(this._hbVariations);
+      this._unitsFont.setScale(this.upem, this.upem);
+    }
+    return this._unitsFont;
+  }
+
   /** Glyph outline in font units as a Path2D (browser only), cached per glyph. */
   glyphPath(gid) {
     let path = this._paths.get(gid);
     if (path === undefined) {
-      if (!this._unitsFont) {
-        const hb = this.file.hb;
-        this._unitsFont = new hb.Font(this.file.face);
-        this._unitsFont.setVariations(this._hbVariations);
-        this._unitsFont.setScale(this.upem, this.upem);
-      }
-      const svg = this._unitsFont.glyphToPath(gid);
+      const svg = this._units().glyphToPath(gid);
       path = svg && typeof Path2D !== 'undefined' ? new Path2D(svg) : null;
       this._paths.set(gid, path);
     }
     return path;
+  }
+
+  /** Ink box in font units { xBearing, yBearing, width, height } (y up; height negative). Cached. */
+  glyphExtents(gid) {
+    this._extents ??= new Map();
+    let e = this._extents.get(gid);
+    if (e === undefined) {
+      e = this._units().glyphExtents(gid) ?? { xBearing: 0, yBearing: 0, width: 0, height: 0 };
+      this._extents.set(gid, e);
+    }
+    return e;
   }
 }
 

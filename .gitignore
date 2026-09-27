@@ -17,3 +17,6 @@ _ref/menu/
 _oracle/*.json
 
 _ref/port/
+
+# Third-party sources and build intermediates (tools/fetch-godot-src.py, tools/build-ftw.mjs)
+_build/

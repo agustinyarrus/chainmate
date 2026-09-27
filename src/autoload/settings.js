@@ -6,6 +6,7 @@
 import { Signal } from '../godot/signal.js';
 import { InputMap, KEY, JOY } from '../godot/input.js';
 import { OS, UserStore } from '../godot/os.js';
+import { SceneTree } from '../godot/scene.js';
 
 const PATH = 'chainmate:settings';
 const DEFAULTS = Object.freeze({
@@ -36,7 +37,8 @@ class SettingsAutoload {
     this.ephemeral = args.includes('--ephemeral') || args.includes('--capture');
     this._register_input();
     if (!this.ephemeral) this._load();
-    queueMicrotask(() => this.apply());
+    // apply.call_deferred(): at the first message-queue flush, once the scene is in the tree.
+    SceneTree.current.callDeferred(() => this.apply());
   }
 
   get_value(key) {

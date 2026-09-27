@@ -1,12 +1,21 @@
 /**
- * Scene tree — the slice of Godot's SceneTree the game uses.
+ * Scene tree — the slice of Godot's SceneTree the game uses, running frames in the shipped engine's
+ * order, as measured inside the original build (_oracle/probe_frame_order.gd):
  *
- * Order of operations per frame (as in Godot): node `_process` in tree order → timers → tweens →
- * deferred calls and queued frees → render. `_enter_tree` runs parent-first, `_ready` child-first,
- * once per node. `_unhandled_input` goes to nodes in REVERSE tree order until one marks it handled
- * (so an open modal sees Esc before the board does).
+ *   physics frames due (60/s): physics_frame → deferred calls → queued frees
+ *   idle frame:  process_frame → deferred calls → _process (tree order) → deferred calls
+ *                → timers → tweens → queued frees → deferred calls
+ *   render:      render hooks (GPU particles, Label3D) → draw → frame_post_draw
+ *
+ * Timers run in creation order, tweens in list order; one created while its own phase runs waits for
+ * the next frame, while a tween created by a timer still runs in the same frame. Coroutines resume
+ * synchronously inside the emission that wakes them (coroutine.js), so their code lands in the same
+ * phase as in Godot. `_enter_tree` runs parent-first, `_ready` child-first, once per node.
+ * `_unhandled_input` goes to nodes in REVERSE tree order until one marks it handled (an open modal
+ * sees Esc before the board does).
  */
 import { Tween } from './tween.js';
+import { Signal } from './signal.js';
 
 let nextNodeId = 1;
 
@@ -101,7 +110,7 @@ export class Node {
     this._inside = false;
   }
 
-  /** Deferred free (end of frame), like Godot. */
+  /** Deferred free: the node stays in the tree (and keeps getting input) until the next flush point. */
   queue_free() {
     if (this._queued || this._freed) return;
     this._queued = true;
@@ -141,10 +150,21 @@ export class Node {
 
 export const isInstanceValid = (node) => node != null && !node._freed;
 
-/**
- * The frame driver. `timer(seconds)` / `processFrame()` return promises so ported coroutines can
- * `await` them exactly where GDScript awaited `create_timer(...).timeout` / `process_frame`.
- */
+/** Godot's project defaults (physics/common/physics_ticks_per_second, max_physics_steps_per_frame). */
+const PHYSICS_TICKS_PER_SECOND = 60;
+const MAX_PHYSICS_STEPS_PER_FRAME = 8;
+/** A deferred call that keeps queuing itself would hang Godot; here it fails loudly instead. */
+const MESSAGE_QUEUE_ROUND_LIMIT = 4096;
+
+/** `get_tree().create_timer(seconds)` — counts down by each idle frame's delta; `timeout` fires at <= 0. */
+export class SceneTreeTimer {
+  constructor(seconds) {
+    this.time_left = seconds;
+    this.timeout = new Signal();
+  }
+}
+
+/** The frame driver. */
 export class SceneTree {
   /** @type {SceneTree} */
   static current = null;
@@ -154,72 +174,123 @@ export class SceneTree {
     this.root = new Node('root');
     this.root._inside = true;
     this.root._readyDone = true;
+    /** Live tweens in creation order (a Set iterates in insertion order). */
     this.tweens = new Set();
+    /** @type {SceneTreeTimer[]} */
     this._timers = [];
-    this._frameWaiters = [];
-    this._postDrawWaiters = [];
-    this._deferred = [];
-    this._freeQueue = [];
-    /** Callbacks that run at render time, after process/timers/tweens (GPU particles, Label3D). */
+    /** @type {Function[]} MessageQueue: call_deferred and CONNECT_DEFERRED emissions. */
+    this._messageQueue = [];
+    /** @type {Node[]} queue_free()d nodes, deleted at the flush points above. */
+    this._deleteQueue = [];
+    /** Callbacks that run at render time, after the frame's logic (GPU particles, Label3D). */
     this.renderHooks = new Set();
+    this.process_frame = new Signal();
+    this.physics_frame = new Signal();
+    /** RenderingServer.frame_post_draw */
+    this.frame_post_draw = new Signal();
     this.time = 0;
     this.frame = 0;
+    this._physicsTime = 0;
     this._handled = false;
   }
 
-  /** `get_tree().create_timer(seconds).timeout` */
-  timer(seconds) {
-    return new Promise((resolve) => this._timers.push({ at: this.time + Math.max(0, seconds), resolve }));
+  /** `get_tree().create_timer(seconds)` */
+  create_timer(seconds) {
+    const timer = new SceneTreeTimer(seconds);
+    this._timers.push(timer);
+    return timer;
   }
 
-  /** `await get_tree().process_frame` */
-  processFrame() {
-    return new Promise((resolve) => this._frameWaiters.push(resolve));
-  }
-
-  /** `await RenderingServer.frame_post_draw` */
-  framePostDraw() {
-    return new Promise((resolve) => this._postDrawWaiters.push(resolve));
-  }
-
-  /** `callable.call_deferred()` — runs at the end of this frame. */
+  /** `callable.call_deferred()` */
   callDeferred(fn) {
-    this._deferred.push(fn);
+    this._messageQueue.push(fn);
   }
 
   queueFree(node) {
-    this._freeQueue.push(node);
+    this._deleteQueue.push(node);
   }
 
-  /** One frame of simulation. O(nodes + timers + tweens). */
+  /**
+   * Main::iteration — the physics frames due by now, then one idle frame; the caller renders next.
+   * Physics time accumulates at a fixed 1/60 s; a stalled frame runs at most 8 physics frames and
+   * drops the rest (Godot slows down instead of spiralling). O(nodes + timers + tweens).
+   */
+  iteration(delta) {
+    const tick = 1 / PHYSICS_TICKS_PER_SECOND;
+    this._physicsTime += delta;
+    let steps = Math.floor(this._physicsTime / tick + 1e-9);
+    if (steps > MAX_PHYSICS_STEPS_PER_FRAME) {
+      steps = MAX_PHYSICS_STEPS_PER_FRAME;
+      this._physicsTime = steps * tick;
+    }
+    this._physicsTime = Math.max(0, this._physicsTime - steps * tick);
+    for (let i = 0; i < steps; i++) this._physicsStep();
+    this.step(delta);
+  }
+
+  /** SceneTree::physics_process for a game without physics processing: the signal and the flushes. */
+  _physicsStep() {
+    this.physics_frame.emit();
+    this.flushMessageQueue();
+    this.flushDeleteQueue();
+  }
+
+  /** SceneTree::process — one idle frame in the measured order. */
   step(delta) {
     this.frame += 1;
     this.time += delta;
-    for (const resolve of this._frameWaiters.splice(0)) resolve();
+    this.process_frame.emit();
+    this.flushMessageQueue();
     this._processTree(this.root, delta);
-    if (this._timers.length) {
-      const due = [];
-      this._timers = this._timers.filter((timer) => {
-        if (timer.at <= this.time) {
-          due.push(timer);
-          return false;
-        }
-        return true;
-      });
-      due.sort((a, b) => a.at - b.at);
-      for (const timer of due) timer.resolve();
-    }
-    for (const tween of Array.from(this.tweens)) tween.step(delta);
-    this.flush();
+    this.flushMessageQueue();
+    this._processTimers(delta);
+    this._processTweens(delta);
+    this.flushDeleteQueue();
+    this.flushMessageQueue();
   }
 
-  /** Deferred calls, then queued frees (repeats while deferred calls queue more). */
-  flush() {
-    let guard = 0;
-    while ((this._deferred.length || this._freeQueue.length) && guard++ < 16) {
-      for (const fn of this._deferred.splice(0)) fn();
-      for (const node of this._freeQueue.splice(0)) if (!node._freed) node.free();
+  /** Runs deferred calls until none are left, including ones queued meanwhile (CallQueue::flush). */
+  flushMessageQueue() {
+    let rounds = 0;
+    while (this._messageQueue.length) {
+      if (++rounds > MESSAGE_QUEUE_ROUND_LIMIT) {
+        const stuck = this._messageQueue.splice(0);
+        throw new Error(`deferred calls keep re-queuing themselves (${stuck.length} pending after ${MESSAGE_QUEUE_ROUND_LIMIT} rounds)`);
+      }
+      for (const fn of this._messageQueue.splice(0)) fn();
     }
+  }
+
+  /** Deletes queued nodes, including ones queued while deleting (SceneTree::_flush_delete_queue). */
+  flushDeleteQueue() {
+    while (this._deleteQueue.length) {
+      for (const node of this._deleteQueue.splice(0)) if (!node._freed) node.free();
+    }
+  }
+
+  /**
+   * SceneTree::process_timers — creation order; a timer created while this runs (by a timeout or by a
+   * coroutine it resumed) starts counting next frame. O(timers).
+   */
+  _processTimers(delta) {
+    const timers = this._timers;
+    const count = timers.length;
+    if (count === 0) return;
+    const kept = [];
+    for (let i = 0; i < count; i++) {
+      const timer = timers[i];
+      timer.time_left -= delta;
+      if (timer.time_left <= 0) timer.timeout.emit();
+      else kept.push(timer);
+    }
+    for (let i = count; i < timers.length; i++) kept.push(timers[i]);
+    this._timers = kept;
+  }
+
+  /** SceneTree::process_tweens — a tween created while this runs starts next frame. O(tweens). */
+  _processTweens(delta) {
+    if (this.tweens.size === 0) return;
+    for (const tween of Array.from(this.tweens)) tween.step(delta);
   }
 
   /** Render-time systems (Godot updates particles in the rendering step, after the frame's logic). */
@@ -227,8 +298,9 @@ export class SceneTree {
     for (const hook of Array.from(this.renderHooks)) hook(delta);
   }
 
+  /** After the frame is drawn: RenderingServer.frame_post_draw. */
   afterDraw() {
-    for (const resolve of this._postDrawWaiters.splice(0)) resolve();
+    this.frame_post_draw.emit();
   }
 
   _processTree(node, delta) {
@@ -237,7 +309,7 @@ export class SceneTree {
     for (const child of node.children.slice()) if (child._inside) this._processTree(child, delta);
   }
 
-  /** Unhandled input: reverse tree order, stops once handled. */
+  /** Unhandled input: reverse tree order, stops once handled. O(nodes). */
   dispatchUnhandledInput(event) {
     this._handled = false;
     const order = [];
@@ -256,5 +328,10 @@ export class SceneTree {
   /** `get_viewport().set_input_as_handled()` */
   setInputAsHandled() {
     this._handled = true;
+  }
+
+  /** `get_viewport().is_input_handled()` */
+  isInputHandled() {
+    return this._handled;
   }
 }
