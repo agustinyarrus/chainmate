@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "fastnoise-lite": "^1.1.1",
+    "harfbuzzjs": "^1.6.2",
     "three": "^0.186.1"
   },
   "devDependencies": {

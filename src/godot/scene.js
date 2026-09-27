@@ -160,6 +160,8 @@ export class SceneTree {
     this._postDrawWaiters = [];
     this._deferred = [];
     this._freeQueue = [];
+    /** Callbacks that run at render time, after process/timers/tweens (GPU particles, Label3D). */
+    this.renderHooks = new Set();
     this.time = 0;
     this.frame = 0;
     this._handled = false;
@@ -218,6 +220,11 @@ export class SceneTree {
       for (const fn of this._deferred.splice(0)) fn();
       for (const node of this._freeQueue.splice(0)) if (!node._freed) node.free();
     }
+  }
+
+  /** Render-time systems (Godot updates particles in the rendering step, after the frame's logic). */
+  preRender(delta) {
+    for (const hook of Array.from(this.renderHooks)) hook(delta);
   }
 
   afterDraw() {

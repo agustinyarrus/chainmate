@@ -65,6 +65,12 @@ export class Node3D extends Node {
   set visible(on) {
     this.object3d.visible = on;
   }
+  show() {
+    this.visible = true;
+  }
+  hide() {
+    this.visible = false;
+  }
 
   /** `node.basis = b` — decomposed into rotation + scale. */
   set basis(b) {
@@ -313,6 +319,51 @@ export class Camera3D extends Node3D {
     this.object3d.lookAt(target.x, target.y, target.z);
   }
   make_current() {}
+
+  /**
+   * Viewport size (in the same units as the screen points given to the projection helpers); set by
+   * the app. Only the aspect ratio and the unit matter, as in Godot's get_camera_rect_size().
+   */
+  static viewportSize = () => ({ x: 1600, y: 900 });
+
+  /** Perspective camera: rays start at the camera. */
+  project_ray_origin(_point) {
+    return this.global_position;
+  }
+
+  /** Camera3D::project_ray_normal — through the near-plane half extents, into world space. */
+  project_ray_normal(point) {
+    const size = Camera3D.viewportSize();
+    const camera = this.camera;
+    camera.aspect = size.x / Math.max(size.y, 1);
+    camera.updateProjectionMatrix();
+    const halfH = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * camera.near;
+    const halfW = halfH * camera.aspect;
+    const local = new THREE.Vector3(((point.x / size.x) * 2 - 1) * halfW, ((1 - point.y / size.y) * 2 - 1) * halfH, -camera.near).normalize();
+    this.object3d.updateWorldMatrix(true, false);
+    local.transformDirection(this.object3d.matrixWorld);
+    return new Vector3(local.x, local.y, local.z);
+  }
+
+  /** Camera3D::unproject_position — world point → screen point in viewport units. */
+  unproject_position(world) {
+    const size = Camera3D.viewportSize();
+    const camera = this.camera;
+    camera.aspect = size.x / Math.max(size.y, 1);
+    camera.updateProjectionMatrix();
+    this.object3d.updateWorldMatrix(true, false);
+    camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+    const p = new THREE.Vector3(world.x, world.y, world.z).project(camera);
+    return { x: (p.x * 0.5 + 0.5) * size.x, y: (1 - (p.y * 0.5 + 0.5)) * size.y };
+  }
+
+  /** Camera3D::is_position_behind */
+  is_position_behind(world) {
+    this.object3d.updateWorldMatrix(true, false);
+    const forward = new THREE.Vector3(0, 0, -1).transformDirection(this.object3d.matrixWorld);
+    const eye = new THREE.Vector3().setFromMatrixPosition(this.object3d.matrixWorld);
+    return forward.dot(new THREE.Vector3(world.x - eye.x, world.y - eye.y, world.z - eye.z)) < this.camera.near;
+  }
 }
 
 /** Godot's Environment resource (the fields the arena drives). */

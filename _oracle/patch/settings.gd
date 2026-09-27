@@ -139,6 +139,7 @@ func _run_oracle(path: String) -> void:
 		print("ORACLE_ERROR cannot load ", path)
 	else:
 		var probe: Object = script.new()
-		probe.call("run", self)
+		# Probes may be coroutines (they wait frames for layout); a plain return passes straight through.
+		await probe.call("run", self)
 	print("ORACLE_DONE")
 	get_tree().quit()

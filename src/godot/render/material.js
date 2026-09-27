@@ -172,7 +172,10 @@ function buildSources(spec, forDepth) {
   const uniformDecl = Object.entries(spec.uniforms ?? {})
     .map(([name, u]) => `uniform ${u.type} ${name};`)
     .join('\n');
-  const common = `${defines.join('\n')}\n${SHARED_UNIFORMS_GLSL}\n${uniformDecl}\n${SMOOTHSTEP_GLSL}\n${spec.varyings ?? ''}\n${portGlsl(spec.functions)}\n`;
+  // Helper functions may use fragment-only built-ins (dFdx, fwidth): like Godot's compiler, which only
+  // keeps what each stage uses, they go to the fragment stage (vertex() bodies never call them).
+  const common = `${defines.join('\n')}\n${SHARED_UNIFORMS_GLSL}\n${uniformDecl}\n${SMOOTHSTEP_GLSL}\n${spec.varyings ?? ''}\n${portGlsl(spec.vertexFunctions)}\n`;
+  const fragmentFunctions = portGlsl(spec.functions);
 
   const vertexShader = /* glsl */ `
 precision highp float;
@@ -232,6 +235,7 @@ precision highp int;
 #include <packing>
 #include <shadowmap_pars_fragment>
 ${common}
+${fragmentFunctions}
 ${LIGHTING_GLSL}
 uniform bool receiveShadow;
 varying vec3 gd_view_pos;
@@ -349,6 +353,8 @@ ${portGlsl(spec.fragment)}
 
 function blendingOf(rm) {
   if (rm.blend === 'add') return THREE.AdditiveBlending;
+  // blend_premul_alpha: ONE, ONE_MINUS_SRC_ALPHA (colour already multiplied by alpha in the shader).
+  if (rm.blend === 'premul') return THREE.CustomBlending;
   if (rm.alpha) return THREE.NormalBlending;
   return THREE.NoBlending;
 }
@@ -368,7 +374,7 @@ export class SpatialMaterial extends THREE.ShaderMaterial {
       const initial = name in values ? values[name] : u.value !== undefined ? u.value : TYPE_DEFAULTS[u.type];
       uniforms[name] = { value: toUniformValue(u.type, initial, u.source) };
     }
-    const transparent = rm.blend === 'add' || Boolean(rm.alpha);
+    const transparent = rm.blend === 'add' || rm.blend === 'premul' || Boolean(rm.alpha);
     super({
       name: spec.name,
       glslVersion: THREE.GLSL3,
@@ -384,6 +390,12 @@ export class SpatialMaterial extends THREE.ShaderMaterial {
       side: rm.cull === 'disabled' ? THREE.DoubleSide : rm.cull === 'front' ? THREE.BackSide : THREE.FrontSide,
     });
     this.toneMapped = false;
+    if (rm.blend === 'premul') {
+      this.blendSrc = THREE.OneFactor;
+      this.blendDst = THREE.OneMinusSrcAlphaFactor;
+      this.blendSrcAlpha = THREE.OneFactor;
+      this.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+    }
     // Godot's defaults for missing arrays: COLOR = white, UV/UV2 = 0, instance colour = white.
     this.defaultAttributeValues = { aColor: [1, 1, 1, 1], aUv2: [0, 0], uv: [0, 0], aInstanceColor: [1, 1, 1, 1] };
     this.receivesShadow = !rm.shadowsDisabled;
@@ -478,6 +490,8 @@ export class StandardMaterial3D extends SpatialMaterial {
       rim: Boolean(options.rim_enabled),
     };
     super({ name: 'standard', renderMode, ...STANDARD_SPEC_BASE }, {});
+    /** The construction options, kept for inspection (tests compare them with the original's). */
+    this.options = Object.freeze({ ...options });
     this.albedo_color = options.albedo_color ?? Color.WHITE;
     this.roughness = options.roughness ?? 1.0;
     this.metallic = options.metallic ?? 0.0;

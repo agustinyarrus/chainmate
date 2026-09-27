@@ -295,9 +295,16 @@ export class Color {
   }
   srgb_to_linear() { return new Color(Color._toLinear(this.r), Color._toLinear(this.g), Color._toLinear(this.b), this.a); }
   linear_to_srgb() { return new Color(Color._toSrgb(this.r), Color._toSrgb(this.g), Color._toSrgb(this.b), this.a); }
-  /** Godot's `to_html(with_alpha = true)` → "rrggbbaa". */
+  /**
+   * Godot's `to_html(with_alpha = true)` → "rrggbbaa". `_to_hex` rounds `p_val * 255.0f` computed in
+   * float32 (0.9 → 229.5 → "e6"; in doubles it would be 229.49999… → "e5").
+   */
   to_html(withAlpha = true) {
-    const byte = (v) => Math.round(Math.min(Math.max(v, 0), 1) * 255).toString(16).padStart(2, '0');
+    const byte = (v) => {
+      const scaled = F(F(v) * 255);
+      const rounded = scaled < 0 ? -Math.round(-scaled) : Math.round(scaled);
+      return Math.min(Math.max(rounded, 0), 255).toString(16).padStart(2, '0');
+    };
     return byte(this.r) + byte(this.g) + byte(this.b) + (withAlpha ? byte(this.a) : '');
   }
   equals(o) { return o instanceof Color && this.r === o.r && this.g === o.g && this.b === o.b && this.a === o.a; }
