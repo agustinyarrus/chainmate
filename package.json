@@ -1,0 +1,21 @@
+{
+  "name": "chainmate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chainmate — a native 3D chess roguelite. JavaScript + Three.js edition.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5190",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4190",
+    "test": "node --test --test-reporter=spec \"test/*.test.mjs\"",
+    "oracle": "node tools/oracle.mjs",
+    "tour": "node e2e/tour.mjs"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "vite": "^8.3.1"
+  }
+}
