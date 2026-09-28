@@ -1,37 +1,43 @@
 /**
- * Label3D — text in the 3D scene exactly as Godot lays it out:
- *   - glyphs shaped by the port's TextServer (same advances as the original, integer at these sizes);
- *   - HORIZONTAL/VERTICAL_ALIGNMENT_CENTER: pen starts at −width/2, baseline at (descent − ascent)/2;
- *   - one pixel of text = pixel_size world units;
- *   - outline: FreeType stroker ring of outline_size/4 px drawn under the fill (outline_render_priority)
- *     in outline_modulate; fill in modulate — both vertex colours Godot converts from sRGB;
- *   - unshaded, double sided, alpha blended, optional billboard / no depth test, render priority.
+ * Label3D — port of scene/3d/label_3d.cpp (Godot 4.7): text in the 3D scene, one textured quad per
+ * glyph straight from the font's glyph cache.
  *
- * The two layers are rasterised once into one mask texture (R = fill, G = outline) and composited
- * in the shader as "fill over outline", so tweening modulate or its alpha never re-rasterises.
- * Masks are cached per (font, size, outline, text). Rebuilds happen at render time, like Godot's
- * deferred _im_update.
+ *   layout    the line is shaped by the text server at font_size; with centre alignment the pen
+ *             starts at −width/2 and the first baseline at (total height − line spacing)/2 − ascent,
+ *             everything multiplied by pixel_size;
+ *   glyphs    bitmap of (font_size, outline_size) without sub-pixel variants; the quad is the glyph
+ *             rectangle (bitmap plus its one-pixel margin) offset from the pen;
+ *   surfaces  outline quads first (outline_render_priority), then the text's (render_priority), each
+ *             blended on its own — overlapping outlines of neighbouring letters add up, as in the
+ *             engine; vertex colours are modulate / outline_modulate, sRGB converted by the shader;
+ *   material  StandardMaterial3D::get_material_for_2d: unshaded, alpha blended, double sided,
+ *             optional billboard and no depth test, linear filtering.
+ *
+ * The mesh is rebuilt at render time when text, font or sizes change (the engine's deferred
+ * _im_update); colour changes only rewrite the colour buffer. O(glyphs) either way.
  */
 import * as THREE from 'three';
 import { Color } from './math.js';
 import { Node3D } from './node3d.js';
 import { SceneTree } from './scene.js';
 import { SpatialMaterial } from './render/material.js';
-import { drawGlyphs, outlineRadius } from './text/raster.js';
+import { ATLAS_SIZE, GlyphAtlas } from './text/atlas.js';
 
-/** Extra texels around the text so outline anti-aliasing never touches the edge. */
-const PAD = 2;
-const MASK_CACHE_LIMIT = 64;
+const VERTICES_PER_GLYPH = 4;
+const FIXED_ONE = 64;
+const DEFAULT_LINE_SPACING = 0;
 
 const LABEL_SHADER = (depthTest) => ({
   name: depthTest ? 'label3d' : 'label3d_nodepth',
-  renderMode: { unshaded: true, blend: 'premul', depthDraw: 'never', depthTest, cull: 'disabled', shadowsDisabled: true, fogDisabled: true },
+  renderMode: { unshaded: true, alpha: true, depthDraw: 'never', depthTest, cull: 'disabled', shadowsDisabled: true, fogDisabled: true },
   uniforms: {
-    mask: { type: 'sampler2D', value: null },
-    fill_color: { type: 'vec4', value: new Color(1, 1, 1, 1), source: true },
-    outline_color: { type: 'vec4', value: new Color(0, 0, 0, 1), source: true },
+    texture_albedo: { type: 'sampler2D', value: null },
     billboard: { type: 'float', value: 0 },
   },
+  functions: /* glsl */ `
+vec3 label_srgb_to_linear(vec3 color) {
+	return mix(pow((color + vec3(0.055)) * (1.0 / (1.0 + 0.055)), vec3(2.4)), color * (1.0 / 12.92), lessThan(color, vec3(0.04045)));
+}`,
   vertex: /* glsl */ `
 	if (billboard > 0.5) {
 		// BILLBOARD_ENABLED: face the camera plane, keep the node's scale.
@@ -40,78 +46,35 @@ const LABEL_SHADER = (depthTest) => ({
 		MODELVIEW_MATRIX = MODELVIEW_MATRIX * mat4(vec4(s.x, 0.0, 0.0, 0.0), vec4(0.0, s.y, 0.0, 0.0), vec4(0.0, 0.0, s.z, 0.0), vec4(0.0, 0.0, 0.0, 1.0));
 	}`,
   fragment: /* glsl */ `
-	vec4 m = texture(mask, UV);
-	float fa = m.r * fill_color.a;
-	float oa = m.g * outline_color.a;
-	// Outline surface first, fill surface over it (premultiplied).
-	ALBEDO = fill_color.rgb * fa + outline_color.rgb * oa * (1.0 - fa);
-	ALPHA = fa + oa * (1.0 - fa);`,
+	vec4 albedo_tex = texture(texture_albedo, UV);
+	// vertex_color_is_srgb + vertex_color_use_as_albedo
+	ALBEDO = label_srgb_to_linear(COLOR.rgb) * albedo_tex.rgb;
+	ALPHA = COLOR.a * albedo_tex.a;`,
 });
 
-const maskCache = new Map();
+/** One atlas for every Label3D; its pages become three.js textures on first use. */
+const atlas = new GlyphAtlas();
 
-/** Rasterises fill and outline masks of one line of text. Cached, LRU. */
-function textMask(font, size, outlineSize, text) {
-  const key = `${font.name}|${size}|${outlineSize}|${text}`;
-  const hit = maskCache.get(key);
-  if (hit) {
-    maskCache.delete(key);
-    maskCache.set(key, hit);
-    return hit;
+function pageTexture(page) {
+  if (!page.handle) {
+    const texture = new THREE.DataTexture(page.pixels, ATLAS_SIZE, ATLAS_SIZE, THREE.RGBAFormat);
+    texture.magFilter = THREE.LinearFilter;
+    texture.minFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    texture.colorSpace = THREE.NoColorSpace;
+    page.handle = texture;
+    page.dirty = true;
   }
-  const shaped = font.shape(text, size);
-  const radius = outlineSize > 0 ? outlineRadius(outlineSize) : 0;
-  const margin = Math.ceil(radius) + PAD;
-  // Glyph ink may overhang the advance box (italics, bearings): measure generously.
-  const width = Math.max(1, Math.ceil(shaped.width) + margin * 2 + Math.ceil(size * 0.25));
-  const height = Math.ceil(shaped.ascent + shaped.descent) + margin * 2;
-  const originX = margin + Math.ceil(size * 0.125);
-  const baseline = margin + shaped.ascent;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const layer = (mode) => {
-    ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = '#fff';
-    ctx.strokeStyle = '#fff';
-    drawGlyphs(ctx, shaped, originX, baseline, { mode, radius });
-    return ctx.getImageData(0, 0, width, height).data;
-  };
-  const fill = layer('fill');
-  const ring = radius > 0 ? layer('stroke') : null;
-  const data = new Uint8Array(width * height * 4);
-  for (let i = 0; i < width * height; i++) {
-    data[i * 4] = fill[i * 4 + 3];
-    data[i * 4 + 1] = ring ? ring[i * 4 + 3] : 0;
-    data[i * 4 + 3] = 255;
+  if (page.dirty) {
+    page.handle.needsUpdate = true;
+    page.dirty = false;
   }
-  const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat);
-  texture.magFilter = THREE.LinearFilter;
-  texture.minFilter = THREE.LinearFilter;
-  texture.generateMipmaps = false;
-  texture.needsUpdate = true;
-  const mask = { texture, width, height, originX, baseline, lineWidth: shaped.width, ascent: shaped.ascent, descent: shaped.descent, users: 0 };
-  maskCache.set(key, mask);
-  if (maskCache.size > MASK_CACHE_LIMIT) {
-    for (const [k, m] of maskCache) {
-      if (m.users > 0) continue;
-      m.texture.dispose();
-      maskCache.delete(k);
-      if (maskCache.size <= MASK_CACHE_LIMIT) break;
-    }
-  }
-  return mask;
+  return page.handle;
 }
 
 export class Label3D extends Node3D {
   constructor() {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(12), 3));
-    geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]), 3));
-    geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), 2));
-    geometry.setIndex([0, 3, 2, 0, 2, 1]);
-    super('Label3D', new THREE.Mesh(geometry));
+    super('Label3D', new THREE.Mesh(new THREE.BufferGeometry(), []));
     this.object3d.castShadow = false;
     this.object3d.receiveShadow = false;
     this.object3d.frustumCulled = false;
@@ -120,47 +83,66 @@ export class Label3D extends Node3D {
     this._fontSize = 32;
     this._outlineSize = 12;
     this._pixelSize = 0.005;
+    this._lineSpacing = DEFAULT_LINE_SPACING;
     this._modulate = new Color(1, 1, 1, 1);
     this._outlineModulate = new Color(0, 0, 0, 1);
     this._billboard = false;
     this._noDepthTest = false;
-    this.render_priority = 0;
-    this.outline_render_priority = -1;
-    this._mask = null;
-    this._dirty = true;
-    this._material = null;
+    this._renderPriority = 0;
+    this._outlineRenderPriority = -1;
+    /** What must be rebuilt at the next render: the whole mesh, or only its colours. */
+    this._dirtyMesh = true;
+    this._dirtyColors = false;
+    /** Per surface: { outline: boolean, first vertex, vertex count } — for colour updates. */
+    this._surfaces = [];
+    /** `priority|page id` → { material, page }: one material per atlas page and render priority. */
+    this._materials = new Map();
     this._renderHook = () => this._update();
   }
 
   get text() { return this._text; }
-  set text(v) { this._text = String(v); this._dirty = true; }
+  set text(v) { this._text = String(v); this._dirtyMesh = true; }
   get font() { return this._font; }
-  set font(v) { this._font = v; this._dirty = true; }
+  set font(v) { this._font = v; this._dirtyMesh = true; }
   get font_size() { return this._fontSize; }
-  set font_size(v) { this._fontSize = v; this._dirty = true; }
+  set font_size(v) { this._fontSize = v; this._dirtyMesh = true; }
   get outline_size() { return this._outlineSize; }
-  set outline_size(v) { this._outlineSize = v; this._dirty = true; }
+  set outline_size(v) { this._outlineSize = v; this._dirtyMesh = true; }
   get pixel_size() { return this._pixelSize; }
-  set pixel_size(v) { this._pixelSize = v; this._dirty = true; }
+  set pixel_size(v) { this._pixelSize = v; this._dirtyMesh = true; }
+  get line_spacing() { return this._lineSpacing; }
+  set line_spacing(v) { this._lineSpacing = v; this._dirtyMesh = true; }
+  /** Material render priority of the text's surfaces (the transparent pass sorts by it first). */
+  get render_priority() { return this._renderPriority; }
+  set render_priority(v) { this._renderPriority = v; this._dirtyMesh = true; }
+  /** Material render priority of the outline's surfaces. */
+  get outline_render_priority() { return this._outlineRenderPriority; }
+  set outline_render_priority(v) { this._outlineRenderPriority = v; this._dirtyMesh = true; }
   get no_depth_test() { return this._noDepthTest; }
-  set no_depth_test(v) { this._noDepthTest = Boolean(v); this._material = null; this._dirty = true; }
+  set no_depth_test(v) {
+    this._noDepthTest = Boolean(v);
+    this._dropMaterials();
+    this._dirtyMesh = true;
+  }
 
   /** BaseMaterial3D.BILLBOARD_ENABLED (1) or DISABLED (0); booleans accepted. */
   get billboard() { return this._billboard; }
   set billboard(v) {
     this._billboard = Boolean(v);
-    this._material?.set_shader_parameter('billboard', this._billboard ? 1 : 0);
+    for (const { material } of this._materials.values()) material.set_shader_parameter('billboard', this._billboard ? 1 : 0);
   }
 
   get modulate() { return this._modulate.clone(); }
   set modulate(c) {
     this._modulate = c.clone();
-    this._material?.set_shader_parameter('fill_color', this._modulate);
+    this._dirtyColors = true;
   }
   get outline_modulate() { return this._outlineModulate.clone(); }
   set outline_modulate(c) {
+    // An outline that becomes visible or invisible changes which surfaces exist.
+    if ((c.a !== 0) !== (this._outlineModulate.a !== 0)) this._dirtyMesh = true;
     this._outlineModulate = c.clone();
-    this._material?.set_shader_parameter('outline_color', this._outlineModulate);
+    this._dirtyColors = true;
   }
 
   _enter_tree() {
@@ -175,50 +157,133 @@ export class Label3D extends Node3D {
   _dispose() {
     super._dispose();
     SceneTree.current?.renderHooks.delete(this._renderHook);
-    if (this._mask) this._mask.users -= 1;
     this.object3d.geometry.dispose();
-    this._material?.dispose();
+    this._dropMaterials();
   }
 
-  _ensureMaterial() {
-    if (this._material) return;
-    this._material = new SpatialMaterial(LABEL_SHADER(!this._noDepthTest), {
-      fill_color: this._modulate,
-      outline_color: this._outlineModulate,
-      billboard: this._billboard ? 1 : 0,
-    });
-    this.object3d.material = this._material;
-    this.object3d.renderOrder = Math.max(this.render_priority, this.outline_render_priority);
-    if (this._mask) this._material.uniforms.mask.value = this._mask.texture;
+  _dropMaterials() {
+    for (const { material } of this._materials.values()) material.dispose();
+    this._materials.clear();
   }
 
-  /** Label3D::_shape — mask texture and quad placed on Godot's glyph layout. */
+  /**
+   * One material per atlas page and render priority (the engine: per texture, priority and outline
+   * size — the outline size only picks glyph bitmaps here). The priority rides on the material, so
+   * the transparent pass draws every outline of priority 9 before any text of priority 10, whatever
+   * label they belong to, as the engine's sort does.
+   */
+  _material(page, priority) {
+    const key = `${priority}|${page.id}`;
+    let slot = this._materials.get(key);
+    if (!slot) {
+      const material = new SpatialMaterial(LABEL_SHADER(!this._noDepthTest), { billboard: this._billboard ? 1 : 0 });
+      material.renderPriority = priority;
+      slot = { material, page };
+      this._materials.set(key, slot);
+    }
+    slot.material.uniforms.texture_albedo.value = pageTexture(page);
+    return slot.material;
+  }
+
   _update() {
-    this._ensureMaterial();
-    this.object3d.renderOrder = Math.max(this.render_priority, this.outline_render_priority);
-    if (!this._dirty || !this._font) return;
-    this._dirty = false;
-    const drawOutline = this._outlineSize > 0 && this._outlineModulate.a !== 0;
-    const mask = textMask(this._font, this._fontSize, drawOutline ? this._outlineSize : 0, this._text);
-    if (this._mask) this._mask.users -= 1;
-    mask.users += 1;
-    this._mask = mask;
-    this._material.uniforms.mask.value = mask.texture;
+    if (this._dirtyMesh) this._shape();
+    else if (this._dirtyColors) this._paint();
+    // Glyphs rasterised since the last frame (by this or another label) reach the GPU here.
+    for (const { page } of this._materials.values()) pageTexture(page);
+  }
+
+  /** Label3D::_shape for a single-line text with centred alignment (what the game uses). */
+  _shape() {
+    this._dirtyMesh = false;
+    this._dirtyColors = false;
+    const font = this._font;
+    const geometry = this.object3d.geometry;
+    this._surfaces = [];
+    if (!font || this._text.length === 0) {
+      geometry.setIndex([]);
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+      return;
+    }
+    const shaped = font.shape(this._text, this._fontSize);
     const ps = this._pixelSize;
-    // Pen origin of the (single) line and its baseline, in local units (y up).
-    const penX = (-mask.lineWidth / 2) * ps;
-    const baselineY = ((mask.descent - mask.ascent) / 2) * ps;
-    const left = penX - mask.originX * ps;
-    const right = penX + (mask.width - mask.originX) * ps;
-    const top = baselineY + mask.baseline * ps;
-    const bottom = baselineY + (mask.baseline - mask.height) * ps;
-    const position = this.object3d.geometry.getAttribute('position');
-    position.array.set([left, top, 0, right, top, 0, right, bottom, 0, left, bottom, 0]);
-    position.needsUpdate = true;
-    // DataTexture rows run top-down with v growing downward (flipY off).
-    const uv = this.object3d.geometry.getAttribute('uv');
-    uv.array.set([0, 0, 1, 0, 1, 1, 0, 1]);
-    uv.needsUpdate = true;
-    this.object3d.geometry.computeBoundingSphere();
+    const size26 = this._fontSize * FIXED_ONE;
+    const lineHeight = shaped.ascent + shaped.descent;
+    const totalHeight = (lineHeight + this._lineSpacing) * ps;
+    const begin = (totalHeight - this._lineSpacing * ps) / 2.0;
+    const startX = -(shaped.width * ps) / 2.0;
+    const baseline = begin - shaped.ascent * ps;
+
+    const positions = [];
+    const uvs = [];
+    const indices = [];
+    const groups = [];
+    /** Quads of one pass, grouped by atlas page in order of first use (the engine's surface map). */
+    const pass = (outlineSize, outline) => {
+      const byPage = new Map();
+      let pen = startX;
+      for (const glyph of shaped.glyphs) {
+        const advance = glyph.advance * ps;
+        if (glyph.gid !== 0) {
+          const entry = atlas.glyph(font, size26, outlineSize, glyph.gid, 0);
+          if (!entry.empty) {
+            let quads = byPage.get(entry.page);
+            if (!quads) byPage.set(entry.page, (quads = []));
+            const x = pen + (entry.left + glyph.xOff) * ps;
+            const top = baseline - (entry.top + glyph.yOff) * ps;
+            quads.push({ x0: x, x1: x + entry.w * ps, top, bottom: top - entry.h * ps, entry });
+          }
+        }
+        pen += advance;
+      }
+      for (const [page, quads] of byPage) {
+        const firstVertex = positions.length / 3;
+        const firstIndex = indices.length;
+        for (const q of quads) {
+          const base = positions.length / 3;
+          positions.push(q.x0, q.top, 0, q.x1, q.top, 0, q.x1, q.bottom, 0, q.x0, q.bottom, 0);
+          uvs.push(q.entry.u0, q.entry.v0, q.entry.u1, q.entry.v0, q.entry.u1, q.entry.v1, q.entry.u0, q.entry.v1);
+          indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+        }
+        groups.push({ start: firstIndex, count: indices.length - firstIndex, page, priority: outline ? this._outlineRenderPriority : this._renderPriority });
+        this._surfaces.push({ outline, first: firstVertex, count: quads.length * VERTICES_PER_GLYPH });
+      }
+    };
+    if (this._outlineModulate.a !== 0 && this._outlineSize > 0) pass(this._outlineSize, true);
+    pass(0, false);
+
+    const vertexCount = positions.length / 3;
+    const normals = new Float32Array(vertexCount * 3);
+    for (let i = 0; i < vertexCount; i++) normals[i * 3 + 2] = 1;
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
+    geometry.setAttribute('aColor', new THREE.BufferAttribute(new Float32Array(vertexCount * 4), 4));
+    geometry.setIndex(indices);
+    geometry.clearGroups();
+    const materials = [];
+    groups.forEach((group, i) => {
+      geometry.addGroup(group.start, group.count, i);
+      materials.push(this._material(group.page, group.priority));
+    });
+    this.object3d.material = materials;
+    this._paint();
+  }
+
+  /** Vertex colours: outline_modulate on outline surfaces, modulate on the text's. */
+  _paint() {
+    this._dirtyColors = false;
+    const attribute = this.object3d.geometry.getAttribute('aColor');
+    if (!attribute) return;
+    const colors = attribute.array;
+    for (const surface of this._surfaces) {
+      const c = surface.outline ? this._outlineModulate : this._modulate;
+      for (let i = surface.first; i < surface.first + surface.count; i++) {
+        colors[i * 4] = c.r;
+        colors[i * 4 + 1] = c.g;
+        colors[i * 4 + 2] = c.b;
+        colors[i * 4 + 3] = c.a;
+      }
+    }
+    attribute.needsUpdate = true;
   }
 }

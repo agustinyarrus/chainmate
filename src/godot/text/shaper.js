@@ -4,10 +4,12 @@
  *   glyphs     HarfBuzz (same library Godot links) — ligatures, kerning, lnum/tnum identical;
  *   advances   base advance from FreeType's fixed-point path (hb-ft font funcs: 16.16 axis coordinates,
  *              HVAR, FT_MulDiv scaling, 26.6 rounding) + HarfBuzz's GPOS adjustment;
- *   spacing    FontVariation.spacing_glyph added to every glyph except the text's last;
+ *   spacing    FontVariation.spacing_glyph added (after rounding) to every glyph that advances,
+ *              except from the text's last advancing glyph on;
  *   rounding   sizes ≤ 20 px keep fractional advances (subpixel positioning AUTO); larger sizes round
  *              each advance with the carried rounding remainder (keep_rounding_remainders = true in the
- *              font imports), the carry restarting at every space;
+ *              font imports), the carry restarting at every blank; the glyph's own offset is rounded
+ *              WITH the carry, so a glyph that follows a half-pixel round-up sits one pixel back;
  *   metrics    ascent/descent from FreeType's rounded size metrics.
  *
  * Verified against the original engine over the whole game text corpus: glyph ids, per-glyph advances,
@@ -47,6 +49,11 @@ const isWhitespace = (c) =>
   c === 0x20 || c === 0x09 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x202f || c === 0x205f || c === 0x3000 || isLinebreak(c);
 const isPunctuation = (c) => /[\p{P}\p{S}]/u.test(String.fromCodePoint(c)) && c !== 0x5f;
 const roundHalfAway = (x) => (x < 0 ? -Math.round(-x) : Math.round(x));
+/** ICU u_isblank: TAB and the space separators (category Zs). */
+const isBlank = (c) => c === 0x09 || c === 0x20 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x202f || c === 0x205f || c === 0x3000;
+/** Characters the engine shapes as zero-width (glyph 0, no advance). */
+const isZeroWidth = (c) => (c >= 0x200b && c <= 0x200d) || c === 0x2060 || c === 0xfeff;
+const CMP_EPSILON = 0.00001;
 
 /** One TrueType file: HarfBuzz face + the SFNT tables FreeType's numbers come from. */
 export class FontFile {
@@ -88,8 +95,6 @@ export class FontVariation {
     this._unitAdvances = new Map();
     this._metrics = new Map();
     this._shapeCache = new Map();
-    this._paths = new Map();
-    this._unitsFont = null;
   }
 
   get upem() {
@@ -171,41 +176,47 @@ export class FontVariation {
     const positions = buffer.getGlyphPositions();
     const count = infos.length;
     const glyphs = new Array(count);
+    // hb-ft advances (26.6): FreeType's base advance + HarfBuzz's GPOS adjustment.
+    const advances26 = new Array(count);
+    for (let k = 0; k < count; k++) {
+      const gid = infos[k].codepoint;
+      advances26[k] = advance26(sfnt, this.unitAdvance(gid), scale) + (positions[k].xAdvance - font.glyphHAdvance(gid));
+    }
+    // The run's last glyph that advances: from it on, no glyph spacing is added.
+    let lastAdvancing = count - 1;
+    for (let k = count - 1; k >= 0; k--) {
+      lastAdvancing = k;
+      if (advances26[k] !== 0) break;
+    }
     let width = 0;
     let remainder = 0;
     for (let k = 0; k < count; k++) {
       const info = infos[k];
       const pos = positions[k];
-      const gid = info.codepoint;
       const start = info.cluster;
       const end = k + 1 < count ? infos[k + 1].cluster : text.length;
       const code = text.codePointAt(start) ?? 0;
-      // Godot's x_advance: FreeType base (hb-ft) + GPOS adjustment (HarfBuzz), both in 26.6.
-      const kern = pos.xAdvance - font.glyphHAdvance(gid);
-      const x26 = advance26(sfnt, this.unitAdvance(gid), scale) + kern;
-      const extra = k < count - 1 ? this.spacingGlyph : 0;
-      let advance;
-      if (subpos) {
-        advance = x26 / 64 + extra;
-      } else {
-        if (isWhitespace(code)) remainder = 0;
-        const full = remainder + (x26 / 64 + extra);
-        advance = roundHalfAway(full);
-        remainder = full - advance;
+      const gid = isZeroWidth(code) ? 0 : info.codepoint;
+      if (isBlank(code) || isLinebreak(code)) remainder = 0;
+      let advance = 0;
+      let xOff = 0;
+      let yOff = 0;
+      if (gid !== 0) {
+        xOff = subpos ? pos.xOffset / 64 : roundHalfAway(remainder + pos.xOffset / 64);
+        yOff = -roundHalfAway(pos.yOffset / 64);
+        if (subpos) {
+          advance = advances26[k] / 64;
+        } else {
+          const full = remainder + advances26[k] / 64;
+          advance = roundHalfAway(full);
+          remainder = full - advance;
+        }
       }
+      if (k < lastAdvancing && Math.abs(advance) >= CMP_EPSILON) advance += this.spacingGlyph;
       let flags = GLYPH.VALID;
       if (isWhitespace(code)) flags |= GLYPH.SPACE;
       if (isPunctuation(code)) flags |= GLYPH.PUNCTUATION;
-      glyphs[k] = {
-        gid,
-        start,
-        end,
-        count: 1,
-        advance,
-        xOff: subpos ? pos.xOffset / 64 : roundHalfAway(pos.xOffset / 64),
-        yOff: -roundHalfAway(pos.yOffset / 64),
-        flags,
-      };
+      glyphs[k] = { gid, start, end, count: 1, advance, xOff, yOff, flags };
       width += advance;
     }
     buffer.destroy?.();
@@ -218,39 +229,6 @@ export class FontVariation {
   get_string_size(text, size) {
     const shaped = this.shape(text, size);
     return { x: Math.ceil(shaped.width), y: Math.ceil(shaped.ascent + shaped.descent) };
-  }
-
-  /** HarfBuzz font at scale = units per em (outlines and extents in font units). */
-  _units() {
-    if (!this._unitsFont) {
-      const hb = this.file.hb;
-      this._unitsFont = new hb.Font(this.file.face);
-      this._unitsFont.setVariations(this._hbVariations);
-      this._unitsFont.setScale(this.upem, this.upem);
-    }
-    return this._unitsFont;
-  }
-
-  /** Glyph outline in font units as a Path2D (browser only), cached per glyph. */
-  glyphPath(gid) {
-    let path = this._paths.get(gid);
-    if (path === undefined) {
-      const svg = this._units().glyphToPath(gid);
-      path = svg && typeof Path2D !== 'undefined' ? new Path2D(svg) : null;
-      this._paths.set(gid, path);
-    }
-    return path;
-  }
-
-  /** Ink box in font units { xBearing, yBearing, width, height } (y up; height negative). Cached. */
-  glyphExtents(gid) {
-    this._extents ??= new Map();
-    let e = this._extents.get(gid);
-    if (e === undefined) {
-      e = this._units().glyphExtents(gid) ?? { xBearing: 0, yBearing: 0, width: 0, height: 0 };
-      this._extents.set(gid, e);
-    }
-    return e;
   }
 }
 

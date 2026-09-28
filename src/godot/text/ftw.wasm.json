@@ -1,0 +1,28 @@
+{
+  "freetype": "2.14.3",
+  "harfbuzz": "14.2.0",
+  "engine": "Godot 4.7.2",
+  "bytes": 1411967,
+  "sha256": "149207576f5107f49cd10cc4b7ca0ab02e446c29513c1981bb546083971266bb",
+  "exports": [
+    "_initialize",
+    "ftw_init",
+    "ftw_version",
+    "ftw_malloc",
+    "ftw_free",
+    "ftw_result",
+    "ftw_face_open",
+    "ftw_size_open",
+    "ftw_size_metrics",
+    "ftw_render",
+    "ftw_char_index"
+  ],
+  "imports": [
+    "wasi_snapshot_preview1.environ_get",
+    "wasi_snapshot_preview1.environ_sizes_get",
+    "wasi_snapshot_preview1.fd_close",
+    "wasi_snapshot_preview1.fd_seek",
+    "wasi_snapshot_preview1.fd_write",
+    "wasi_snapshot_preview1.proc_exit"
+  ]
+}

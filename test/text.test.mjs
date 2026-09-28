@@ -43,18 +43,21 @@ test('ascent / descent / height match the engine for sizes 6–100', () => {
   assert.ok(checked >= 6 * 95);
 });
 
-test('glyph ids and advances match TextServerAdvanced glyph by glyph', () => {
+test('glyph ids, advances, offsets and clusters match TextServerAdvanced glyph by glyph', () => {
   const report = [];
   for (const entry of ofKind(textOracle, 'shaped')) {
     const font = FONTS[entry.font];
     let glyphs = 0;
     const misses = [];
-    entry.rows.forEach(([ids, advances], i) => {
+    entry.rows.forEach(([ids, advances, offsets, , starts, ends], i) => {
       const shaped = font.shape(corpus.strings[i], entry.size);
       assert.deepEqual(shaped.glyphs.map((g) => g.gid), ids, `${entry.font}@${entry.size} glyphs of ${JSON.stringify(corpus.strings[i])}`);
       shaped.glyphs.forEach((g, k) => {
         glyphs++;
-        if (Math.abs(g.advance - advances[k]) > 1e-9) misses.push(`${JSON.stringify(corpus.strings[i])}[${k}] ${g.advance} ≠ ${advances[k]}`);
+        const where = `${JSON.stringify(corpus.strings[i])}[${k}]`;
+        if (Math.abs(g.advance - advances[k]) > 1e-9) misses.push(`${where} advance ${g.advance} ≠ ${advances[k]}`);
+        else if (Math.abs(g.xOff - offsets[k]) > 1e-9) misses.push(`${where} offset ${g.xOff} ≠ ${offsets[k]}`);
+        else if (g.start !== starts[k] || g.end !== ends[k]) misses.push(`${where} cluster ${g.start}–${g.end} ≠ ${starts[k]}–${ends[k]}`);
       });
     });
     report.push(`${entry.font}@${entry.size}: ${glyphs - misses.length}/${glyphs}`);
