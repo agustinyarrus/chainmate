@@ -5,20 +5,19 @@
  *   geometry   one dynamic vertex buffer per frame (x, y, u, v, r, g, b, a), batched by texture,
  *              primitive (triangles / 1-px lines) and scissor; straight-alpha "mix" blending like
  *              Godot's canvas (SRC_ALPHA, ONE_MINUS_SRC_ALPHA; alpha ONE, ONE_MINUS_SRC_ALPHA);
- *   text       a glyph atlas (white RGB, coverage in alpha) filled on demand from HarfBuzz outlines
- *              rasterised with Canvas 2D at the final pixel size, with Godot's sub-pixel variants
- *              (¼ px up to 16 px, ½ px up to 20 px, whole pixels above) and FreeType-stroker outlines;
+ *   text       a glyph atlas (white RGB, coverage in alpha) filled on demand with the engine's own
+ *              glyph bitmaps (FreeType in WebAssembly, text/glyphs.js), placed and scaled as
+ *              TextServerAdvanced::_font_draw_glyph does: oversampled size, sub-pixel variants,
+ *              a one-pixel margin around each bitmap, linear filtering;
  *   textures   ImageTexture pixels and theme icons (PNG data URLs, decoded ahead of time).
  *
  * Cost per frame: O(vertices) CPU for the transform pass, a handful of draw calls.
  */
 import { CanvasLayer, CanvasItem, multiply } from './canvas_item.js';
 import { Control } from './control.js';
-import { outlineRadius } from '../text/raster.js';
-import { SUBPIXEL_ONE_HALF_MAX_SIZE, SUBPIXEL_ONE_QUARTER_MAX_SIZE } from '../text/shaper.js';
+import { glyphSize, placeGlyph, quantizeOversampling, subPixelMode } from '../text/glyphs.js';
+import { ATLAS_SIZE, GlyphAtlas } from '../text/atlas.js';
 
-const ATLAS_SIZE = 1024;
-const GLYPH_PAD = 2;
 const FLOATS_PER_VERTEX = 8;
 
 const VERTEX_SHADER = `#version 300 es
@@ -31,7 +30,8 @@ out vec4 v_color;
 void main() {
   v_uv = a_uv;
   v_color = a_color;
-  gl_Position = vec4(a_pos / u_viewport * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
+  // Top-down into the screen buffer: row 0 is the canvas's first row, as in the engine's framebuffer.
+  gl_Position = vec4(a_pos / u_viewport * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
 const FRAGMENT_SHADER = `#version 300 es
@@ -43,98 +43,6 @@ out vec4 frag;
 void main() {
   frag = v_color * texture(u_tex, v_uv);
 }`;
-
-/** Glyph atlas pages: shelf-packed, CPU pixels mirrored to a texture when dirty. */
-class GlyphAtlas {
-  constructor() {
-    this.pages = [];
-    this.entries = new Map();
-    this.scratch = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(256, 256) : document.createElement('canvas');
-    this.ctx = this.scratch.getContext('2d', { willReadFrequently: true });
-  }
-
-  _page() {
-    const page = { pixels: new Uint8Array(ATLAS_SIZE * ATLAS_SIZE * 4), x: 0, y: 0, rowH: 0, dirty: true, texture: null, id: this.pages.length };
-    // White RGB everywhere: glyph colour comes from the vertex colour, coverage from alpha.
-    for (let i = 0; i < page.pixels.length; i += 4) {
-      page.pixels[i] = 255;
-      page.pixels[i + 1] = 255;
-      page.pixels[i + 2] = 255;
-    }
-    this.pages.push(page);
-    return page;
-  }
-
-  _alloc(w, h) {
-    let page = this.pages[this.pages.length - 1] ?? this._page();
-    if (page.x + w > ATLAS_SIZE) {
-      page.x = 0;
-      page.y += page.rowH + 1;
-      page.rowH = 0;
-    }
-    if (page.y + h > ATLAS_SIZE) page = this._page();
-    const slot = { page, x: page.x, y: page.y };
-    page.x += w + 1;
-    page.rowH = Math.max(page.rowH, h);
-    return slot;
-  }
-
-  /**
-   * Glyph bitmap for (font, pixel size, outline, glyph, sub-pixel shift): { page, u0…v1, left, top, w, h }
-   * where (left, top) is the bitmap's offset from the pen position (pixels, y down).
-   */
-  glyph(font, pxSize, outline, gid, shift) {
-    const key = `${font.name}|${pxSize}|${outline}|${gid}|${shift}`;
-    let entry = this.entries.get(key);
-    if (entry) return entry;
-    const k = pxSize / font.upem;
-    const e = font.glyphExtents(gid);
-    const radius = outline > 0 ? outlineRadius(outline) : 0;
-    const margin = Math.ceil(radius) + GLYPH_PAD;
-    const x0 = Math.floor(e.xBearing * k + shift) - margin;
-    const x1 = Math.ceil((e.xBearing + e.width) * k + shift) + margin;
-    const y0 = Math.floor(-e.yBearing * k) - margin;
-    const y1 = Math.ceil(-(e.yBearing + e.height) * k) + margin;
-    const w = Math.max(1, x1 - x0);
-    const h = Math.max(1, y1 - y0);
-    const path = font.glyphPath(gid);
-    if (!path || e.width === 0) {
-      entry = { empty: true };
-      this.entries.set(key, entry);
-      return entry;
-    }
-    if (this.scratch.width < w || this.scratch.height < h) {
-      this.scratch.width = Math.max(this.scratch.width, w);
-      this.scratch.height = Math.max(this.scratch.height, h);
-    }
-    const ctx = this.ctx;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    ctx.translate(-x0 + shift, -y0);
-    ctx.scale(k, -k);
-    if (outline > 0) {
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'butt';
-      ctx.lineWidth = (radius * 2) / k;
-      ctx.strokeStyle = '#fff';
-      ctx.stroke(path);
-    } else {
-      ctx.fillStyle = '#fff';
-      ctx.fill(path);
-    }
-    const data = ctx.getImageData(0, 0, w, h).data;
-    const slot = this._alloc(w, h);
-    const page = slot.page;
-    for (let row = 0; row < h; row++) {
-      const dst = ((slot.y + row) * ATLAS_SIZE + slot.x) * 4;
-      for (let col = 0; col < w; col++) page.pixels[dst + col * 4 + 3] = data[(row * w + col) * 4 + 3];
-    }
-    page.dirty = true;
-    entry = { page, u0: slot.x / ATLAS_SIZE, v0: slot.y / ATLAS_SIZE, u1: (slot.x + w) / ATLAS_SIZE, v1: (slot.y + h) / ATLAS_SIZE, left: x0, top: y0, w, h };
-    this.entries.set(key, entry);
-    return entry;
-  }
-}
 
 export class CanvasRenderer {
   /** @param {import('three').WebGLRenderer} renderer */
@@ -224,18 +132,18 @@ export class CanvasRenderer {
 
   /** The page's GL texture (created on first use; pixel uploads happen once per flush). */
   _atlasTexture(page) {
-    if (!page.texture) {
-      page.texture = this._texture(ATLAS_SIZE, ATLAS_SIZE, page.pixels);
+    if (!page.handle) {
+      page.handle = this._texture(ATLAS_SIZE, ATLAS_SIZE, page.pixels);
       page.dirty = false;
     }
-    return page.texture;
+    return page.handle;
   }
 
   _uploadAtlas() {
     const gl = this.gl;
     for (const page of this.atlas.pages) {
-      if (!page.dirty || !page.texture) continue;
-      gl.bindTexture(gl.TEXTURE_2D, page.texture);
+      if (!page.dirty || !page.handle) continue;
+      gl.bindTexture(gl.TEXTURE_2D, page.handle);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, ATLAS_SIZE, ATLAS_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, page.pixels);
       page.dirty = false;
     }
@@ -244,10 +152,13 @@ export class CanvasRenderer {
   // ───────────────────────────────────────────────────────────────── frame ─────────────────────────
 
   /**
-   * Draws all layers found under `root` (a Node). `scale` maps canvas units to pixels;
-   * (width, height) is the drawing buffer size.
+   * Draws all layers found under `root` (a Node). `stretch` = { x, y } maps canvas units to pixels
+   * (the viewport's stretch transform), `oversampling` is the viewport's font oversampling;
+   * (width, height) is the drawing buffer size; `target` the screen buffer (the engine's rows) the
+   * canvas is drawn into — RenderPipeline.present() brings it to the page.
    */
-  render(root, scale, width, height) {
+  render(root, stretch, oversampling, width, height, target) {
+    if (!target) throw new Error('CanvasRenderer.render: the screen buffer to draw into is required');
     const layers = [];
     const collect = (node) => {
       for (const child of node.children) {
@@ -257,8 +168,9 @@ export class CanvasRenderer {
     };
     collect(root);
     layers.sort((a, b) => a.layer - b.layer);
-    this._begin(width, height);
-    const base = [scale, 0, 0, scale, 0, 0];
+    this._begin(width, height, target);
+    this.fontFactor = quantizeOversampling(oversampling);
+    const base = [stretch.x, 0, 0, stretch.y, 0, 0];
     for (const layer of layers) {
       if (layer.visible === false) continue;
       for (const child of layer.children) if (child instanceof CanvasItem) this._item(child, base, { r: 1, g: 1, b: 1, a: 1 }, null);
@@ -272,7 +184,7 @@ export class CanvasRenderer {
     const m = item._modulate;
     const modulate = { r: parentModulate.r * m.r, g: parentModulate.g * m.g, b: parentModulate.b * m.b, a: parentModulate.a * m.a };
     if (modulate.a <= 0) return;
-    const transform = multiply(parentTransform, item.get_transform());
+    const transform = multiply(parentTransform, item.get_draw_transform ? item.get_draw_transform() : item.get_transform());
     if (item._needsRedraw) item._redraw();
     const sm = item._selfModulate;
     const own = { r: modulate.r * sm.r, g: modulate.g * sm.g, b: modulate.b * sm.b, a: modulate.a * sm.a };
@@ -298,11 +210,11 @@ export class CanvasRenderer {
 
   // ───────────────────────────────────────────────────────────────── batching ──────────────────────
 
-  _begin(width, height) {
+  _begin(width, height, target) {
     const gl = this.gl;
     this.width = width;
     this.height = height;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.renderer.properties.get(target).__webglFramebuffer);
     gl.viewport(0, 0, width, height);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
@@ -370,7 +282,8 @@ export class CanvasRenderer {
       const y0 = Math.max(0, Math.round(b.clip.y0));
       const x1 = Math.min(this.width, Math.round(b.clip.x1));
       const y1 = Math.min(this.height, Math.round(b.clip.y1));
-      gl.scissor(x0, this.height - y1, Math.max(0, x1 - x0), Math.max(0, y1 - y0));
+      // The screen buffer counts rows from the top, like the canvas: no flip.
+      gl.scissor(x0, y0, Math.max(0, x1 - x0), Math.max(0, y1 - y0));
     } else gl.disable(gl.SCISSOR_TEST);
     if (b.primitive === 'lines') {
       gl.drawArrays(gl.LINES, 0, b.v);
@@ -422,14 +335,15 @@ export class CanvasRenderer {
     }
   }
 
-  _quad(texture, x0, y0, x1, y1, u0, v0, u1, v1, c, clip) {
+  /** A textured rectangle given in the item's units, carried to pixels by the affine `t`. */
+  _quad(texture, t, x0, y0, x1, y1, u0, v0, u1, v1, c, clip) {
     this._state(texture, 'triangles', clip, 4, 6);
     const b = this.batch;
     const base = b.v;
-    this._vertex(x0, y0, u0, v0, c.r, c.g, c.b, c.a);
-    this._vertex(x1, y0, u1, v0, c.r, c.g, c.b, c.a);
-    this._vertex(x1, y1, u1, v1, c.r, c.g, c.b, c.a);
-    this._vertex(x0, y1, u0, v1, c.r, c.g, c.b, c.a);
+    this._vertex(t[0] * x0 + t[2] * y0 + t[4], t[1] * x0 + t[3] * y0 + t[5], u0, v0, c.r, c.g, c.b, c.a);
+    this._vertex(t[0] * x1 + t[2] * y0 + t[4], t[1] * x1 + t[3] * y0 + t[5], u1, v0, c.r, c.g, c.b, c.a);
+    this._vertex(t[0] * x1 + t[2] * y1 + t[4], t[1] * x1 + t[3] * y1 + t[5], u1, v1, c.r, c.g, c.b, c.a);
+    this._vertex(t[0] * x0 + t[2] * y1 + t[4], t[1] * x0 + t[3] * y1 + t[5], u0, v1, c.r, c.g, c.b, c.a);
     const I = this.indices;
     I[b.i++] = base;
     I[b.i++] = base + 1;
@@ -445,37 +359,28 @@ export class CanvasRenderer {
     const r = cmd.rect;
     const m = cmd.modulate ?? { r: 1, g: 1, b: 1, a: 1 };
     const c = { r: m.r * mod.r, g: m.g * mod.g, b: m.b * mod.b, a: m.a * mod.a };
-    const x0 = t[0] * r.x + t[2] * r.y + t[4];
-    const y0 = t[1] * r.x + t[3] * r.y + t[5];
-    const x1 = t[0] * (r.x + r.w) + t[2] * (r.y + r.h) + t[4];
-    const y1 = t[1] * (r.x + r.w) + t[3] * (r.y + r.h) + t[5];
-    this._quad(tex, x0, y0, x1, y1, cmd.uv.x, cmd.uv.y, cmd.uv.x + cmd.uv.w, cmd.uv.y + cmd.uv.h, c, clip);
+    this._quad(tex, t, r.x, r.y, r.x + r.w, r.y + r.h, cmd.uv.x, cmd.uv.y, cmd.uv.x + cmd.uv.w, cmd.uv.y + cmd.uv.h, c, clip);
   }
 
-  /** Glyph quads at Godot's pixel positions (sub-pixel variants at small sizes). */
+  /**
+   * TextServerAdvanced::_font_draw_glyph / _font_draw_glyph_outline for a run: the bitmap of each
+   * glyph at the oversampled size and sub-pixel variant, its rectangle scaled back to the item's
+   * units (cache scale / oversampling). O(glyphs).
+   */
   _glyphs(run, t, mod, clip) {
-    const scale = Math.hypot(t[0], t[1]);
-    const pxSize = Math.max(1, Math.round(run.size * scale));
-    const outline = run.outline > 0 ? Math.max(1, Math.round(run.outline * scale)) : 0;
+    const factor = this.fontFactor;
+    const { size26, outline } = glyphSize(run.size, run.outline, factor);
+    if (size26 <= 0) return;
+    const mode = subPixelMode(size26);
     const c = { r: run.color.r * mod.r, g: run.color.g * mod.g, b: run.color.b * mod.b, a: run.color.a * mod.a };
-    const steps = pxSize <= SUBPIXEL_ONE_QUARTER_MAX_SIZE ? 4 : pxSize <= SUBPIXEL_ONE_HALF_MAX_SIZE ? 2 : 1;
     for (const g of run.glyphs) {
-      const px = t[0] * g.x + t[2] * g.y + t[4];
-      const py = t[1] * g.x + t[3] * g.y + t[5];
-      let base;
-      let shift = 0;
-      if (steps === 1) base = Math.round(px);
-      else {
-        const offset = 0.5 / steps;
-        base = Math.floor(px + offset);
-        shift = Math.floor(steps * (px + offset)) - steps * base;
-      }
-      const entry = this.atlas.glyph(run.font, pxSize, outline, g.gid, shift / steps);
+      const place = placeGlyph(g.x, g.y, mode, factor);
+      const entry = this.atlas.glyph(run.font, size26, outline, g.gid, place.shift26);
       if (entry.empty) continue;
-      const tex = this._atlasTexture(entry.page);
-      const x0 = base + entry.left;
-      const y0 = Math.round(py) + entry.top;
-      this._quad(tex, x0, y0, x0 + entry.w, y0 + entry.h, entry.u0, entry.v0, entry.u1, entry.v1, c, clip);
+      const k = entry.scale / factor;
+      const x0 = place.x + entry.left * k;
+      const y0 = place.y + entry.top * k;
+      this._quad(this._atlasTexture(entry.page), t, x0, y0, x0 + entry.w * k, y0 + entry.h * k, entry.u0, entry.v0, entry.u1, entry.v1, c, clip);
     }
   }
 }

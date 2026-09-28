@@ -39,8 +39,7 @@ const arena = new Arena();
 world.add_child(arena);
 arena.set_variant(params.get('variant') ?? 'court');
 arena.set_mood(0.9, 0.25, 0.0);
-const caster = arena.key_light.enableShadowCaster(4096, 6.5);
-pipeline.scene.add(caster, caster.target);
+// The pipeline draws the key light's shadow atlas, the sky and the lights itself (pipeline.render).
 lighting.environment = arena.environment;
 
 const board = new BoardView();
@@ -140,14 +139,12 @@ function frame(now) {
   camera.updateProjectionMatrix();
   world.object3d.updateMatrixWorld(true);
   camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
-  lighting.update(camera);
-  arena.key_light.syncShadowCaster();
-  sky.update(arena.sky);
   pipeline.render(camera, arena.environment);
+  pipeline.present();
   tree.afterDraw();
   frames += 1;
   if (now - fpsClock > 1000) {
-    stats.textContent = `${frames} fps · ${pipeline.stats.drawCalls} draws · ${(pipeline.stats.triangles / 1000).toFixed(0)}k tris · ${pipeline.width}×${pipeline.height}`;
+    stats.textContent = `${frames} fps · ${pipeline.stats.drawCalls} draws · ${(pipeline.stats.triangles / 1000).toFixed(0)}k tris · ${pipeline.width}×${pipeline.height}${pipeline.stats.subsurface ? ' · sss' : ''}`;
     frames = 0;
     fpsClock = now;
   }
