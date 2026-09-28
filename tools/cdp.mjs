@@ -10,10 +10,12 @@
  */
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const CHROME = join(process.env.ProgramFiles ?? 'C:/Program Files', 'Google/Chrome/Application/chrome.exe');
+/** Test profiles live inside the project (git-ignored), never in the system's temporary folder. */
+const PROFILES = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.cache');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Chrome's window frame at scale 1 (tabs, address bar, borders): the viewport needs this much more. */
 const FRAME = { width: 16, height: 95 };
@@ -45,6 +47,10 @@ class Page {
         this.exceptions.push(m.params.exceptionDetails.exception?.description ?? m.params.exceptionDetails.text);
       } else if (m.method === 'Runtime.consoleAPICalled') {
         this.console.push({ type: m.params.type, text: m.params.args.map((a) => a.value ?? a.description ?? '').join(' ') });
+      } else if (m.method === 'Log.entryAdded') {
+        // What the browser itself reports (WebGL errors, failed loads, interventions): not console.* calls.
+        const { level, text, source } = m.params.entry;
+        this.console.push({ type: level, text, source, browser: true });
       }
     });
   }
@@ -72,6 +78,11 @@ class Page {
 
   async goto(url) {
     await this.send('Page.navigate', { url });
+  }
+
+  /** Forgets what an origin stored (localStorage…): a capture starts from a first-run profile. */
+  async clearStorage(origin) {
+    await this.send('Storage.clearDataForOrigin', { origin, storageTypes: 'local_storage,indexeddb,cache_storage' });
   }
 
   async waitFor(expression, { timeout = 60000, label = expression } = {}) {
@@ -129,7 +140,12 @@ class Page {
   }
 }
 
-export async function launchChrome({ port = 9340, width = 1600, height = 900, x = 20, y = 20, profile = join(tmpdir(), `chainmate-chrome-${port}`) } = {}) {
+/**
+ * Opens (or reuses) the test Chrome on `port`. `muteAudio`: the audio graph still renders — an
+ * AnalyserNode measures it — but nothing reaches the speakers (the desktop's user hears nothing).
+ * `autoplay`: false keeps Chrome's real policy (sound only after a user activation).
+ */
+export async function launchChrome({ port = 9340, width = 1600, height = 900, x = 20, y = 20, profile = join(PROFILES, `chrome-${port}`), muteAudio = false, autoplay = true } = {}) {
   if (!(await alive(port))) {
     spawn(CHROME, [
       `--remote-debugging-port=${port}`,
@@ -137,7 +153,8 @@ export async function launchChrome({ port = 9340, width = 1600, height = 900, x 
       '--no-first-run', '--no-default-browser-check', '--disable-features=Translate',
       // A covered or off-screen window must keep rendering and receiving synthetic input.
       '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-background-timer-throttling',
-      '--autoplay-policy=no-user-gesture-required',
+      ...(autoplay ? ['--autoplay-policy=no-user-gesture-required'] : []),
+      ...(muteAudio ? ['--mute-audio'] : []),
       `--window-size=${width + FRAME.width},${height + FRAME.height}`, `--window-position=${x},${y}`, '--force-device-scale-factor=1',
       'about:blank',
     ], { detached: true, stdio: 'ignore' }).unref();
@@ -162,6 +179,7 @@ export async function launchChrome({ port = 9340, width = 1600, height = 900, x 
       const page = new Page(ws);
       await page.send('Page.enable');
       await page.send('Runtime.enable');
+      await page.send('Log.enable');
       return page;
     },
     async close() {

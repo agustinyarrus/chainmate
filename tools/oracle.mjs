@@ -4,6 +4,7 @@
  *
  *   node tools/oracle.mjs primitives            → runs _oracle/probe_primitives.gd → _oracle/primitives.json
  *   node tools/oracle.mjs runs --timeout 600
+ *   node tools/oracle.mjs stages --windowed --fixed-fps 60   → a window (the probe renders), every frame 1/60 s
  *   node tools/oracle.mjs --rebuild             → re-patches Chainmate.exe into _oracle/ChainmateOracle.exe
  *
  * How it works: `ChainmateOracle.exe` is the shipped game with one change, made by GDRE Tools' --pck-patch:
@@ -27,12 +28,13 @@ const DEFAULT_TIMEOUT_S = 180;
 const slash = (p) => p.replaceAll('\\', '/');
 
 function parseArgs(argv) {
-  const options = { probes: [], timeout: DEFAULT_TIMEOUT_S, rebuild: false, windowed: false };
+  const options = { probes: [], timeout: DEFAULT_TIMEOUT_S, rebuild: false, windowed: false, fixedFps: 0 };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--timeout') options.timeout = Number(argv[++i]);
     else if (arg === '--rebuild') options.rebuild = true;
     else if (arg === '--windowed') options.windowed = true;
+    else if (arg === '--fixed-fps') options.fixedFps = Number(argv[++i]);
     else options.probes.push(arg);
   }
   return options;
@@ -88,6 +90,8 @@ async function runProbe(name, options) {
   const spin = spinner(`probe ${name}`);
   const started = Date.now();
   const args = options.windowed ? ['--position', '2600,60', '--audio-driver', 'Dummy'] : ['--headless'];
+  // Every frame advances exactly 1/fps seconds, however long it took: the probe's clock is the port's.
+  if (options.fixedFps > 0) args.push('--fixed-fps', String(options.fixedFps));
   const result = await run(PATCHED_EXE, [...args, '--', `--oracle=${slash(probe)}`], options.timeout, (line) => {
     if (line.startsWith('ORACLE ')) {
       entries.push(JSON.parse(line.slice(7)));

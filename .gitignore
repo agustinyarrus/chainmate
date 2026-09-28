@@ -17,6 +17,20 @@ _ref/menu/
 _oracle/*.json
 
 _ref/port/
+# Regenerated from the original build (tools/oracle.mjs stages, tools/capture-original.ps1)
+_ref/stages/
+_ref/realtime/
+_ref/trace/
+_ref/android/
 
 # Third-party sources and build intermediates (tools/fetch-godot-src.py, tools/build-ftw.mjs)
 _build/
+
+# Test browser profiles (tools/cdp.mjs)
+.cache/
+
+# Android (tools/apk.mjs): the web copy, the packages, the wrapper's modules and signing secrets
+dist-android/
+mobile/node_modules/
+mobile/android/keystore.properties
+mobile/android/*.jks

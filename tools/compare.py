@@ -2,7 +2,9 @@
 """
 compare — pixel comparison of a port screenshot against the original's.
 
-    python tools/compare.py ORIGINAL.png PORT.png [--region x,y,w,h] [--out diff.png] [--zoom 3] [--tolerance 8]
+    python tools/compare.py ORIGINAL.png PORT.png [--region x,y,w,h] [--out diff.png] [--zoom 3] [--tolerance 8] [--json]
+                            [--mask-colored]   ignore the pixels the original paints in colour (debug overlays
+                                               drawn over a grey buffer, like the frusta over the shadow atlas)
 
 Prints, per region: mean absolute difference, the share of pixels off by more than the tolerance, the
 largest difference, and the bounding boxes of the differing clusters (so a wrong glyph or border can be
@@ -13,6 +15,7 @@ Cost: O(pixels) with numpy; clusters come from a coarse grid (16 px cells), O(ce
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +25,7 @@ from PIL import Image
 
 CELL = 16  # cluster grid, pixels
 DIFF_GAIN = 6  # amplification of the difference panel
+COLORED_SPREAD = 8  # a pixel is "coloured" when its channels differ by more than this
 
 RESET = "\x1b[0m"
 
@@ -102,6 +106,8 @@ def main() -> int:
     parser.add_argument("--zoom", type=int, default=1)
     parser.add_argument("--tolerance", type=int, default=8, help="per-channel difference that counts as different")
     parser.add_argument("--top", type=int, default=12, help="clusters to list")
+    parser.add_argument("--json", action="store_true", help="print one JSON line instead of the card")
+    parser.add_argument("--mask-colored", action="store_true", help="ignore pixels the original paints in colour")
     args = parser.parse_args()
 
     a, b = load(args.original), load(args.port)
@@ -111,12 +117,20 @@ def main() -> int:
     ra = a[region.y : region.y + region.h, region.x : region.x + region.w]
     rb = b[region.y : region.y + region.h, region.x : region.x + region.w]
     diff = np.abs(ra - rb)
+    masked = 0
+    if args.mask_colored:
+        colored = (ra.max(axis=2) - ra.min(axis=2)) > COLORED_SPREAD
+        diff[colored] = 0
+        masked = int(colored.sum())
     worst = diff.max(axis=2)
     mask = worst > args.tolerance
-    share = float(mask.mean()) * 100.0
-    mean = float(diff.mean())
-    verdict = paint(GREEN, "identical") if worst.max() == 0 else paint(GREEN, "match") if share < 0.05 else paint(AMBER, "close") if share < 1.0 else paint(RED, "different")
-    card("compare", [
+    counted = max(1, mask.size - masked)
+    share = float(mask.sum()) / counted * 100.0
+    mean = float(diff.sum()) / (counted * 3)
+    name = "identical" if worst.max() == 0 else "match" if share < 0.05 else "close" if share < 1.0 else "different"
+    verdict = paint({"identical": GREEN, "match": GREEN, "close": AMBER, "different": RED}[name], name)
+    if not args.json:
+      card("compare", [
         ("original", str(args.original)),
         ("port", str(args.port)),
         ("region", f"{region.x},{region.y} {region.w}x{region.h}"),
@@ -124,8 +138,8 @@ def main() -> int:
         ("pixels off", f"{share:.3f} %  (> {args.tolerance})"),
         ("max diff", str(int(worst.max()))),
         ("verdict", verdict),
-    ])
-    for x, y, w, h, count in clusters(mask, region)[: args.top]:
+      ])
+      for x, y, w, h, count in clusters(mask, region)[: args.top]:
         print(paint(DIM, "    · ") + paint(BLUE, f"{x},{y}".ljust(10)) + f"{w}x{h}".ljust(10) + paint(DIM, f"{count} px"))
 
     if args.out:
@@ -137,7 +151,10 @@ def main() -> int:
             image = image.resize((image.width * args.zoom, image.height * args.zoom), Image.NEAREST)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         image.save(args.out)
-        print(paint(DIM, "    → ") + str(args.out))
+        if not args.json:
+            print(paint(DIM, "    → ") + str(args.out))
+    if args.json:
+        print(json.dumps({"mean": mean, "share": share, "max": int(worst.max()), "verdict": name, "masked": masked}))
     return 0
 
 
