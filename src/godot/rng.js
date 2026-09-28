@@ -165,6 +165,20 @@ export class RandomNumberGenerator {
     return F(significand) * Math.pow(2, -32 - Math.clz32(protoExpOffset));
   }
 
+  /**
+   * RandomPCG::randd — a double in [0, 1]: an exponent word, then a 64-bit significand made of two
+   * more words (high first — the order the shipped build evaluates `rand() << 32 | rand()` in, measured
+   * by _oracle/probe_global_random.gd) with its top and bottom bits forced on. Three words.
+   */
+  randd() {
+    const protoExpOffset = this._next();
+    if (protoExpOffset === 0) return 0;
+    const high = (this._next() | 0x80000000) >>> 0;
+    const low = (this._next() | 1) >>> 0;
+    // (double)significand: the exact 64-bit sum rounded once to 53 bits, as the C++ conversion does.
+    return (high * TWO_32 + low) * Math.pow(2, -64 - Math.clz32(protoExpOffset));
+  }
+
   /** `randf_range(from, to)` — computed in float32 like `RandomPCG::random(float, float)`. */
   randf_range(from, to) {
     const a = F(from);
@@ -180,12 +194,39 @@ export class RandomNumberGenerator {
   }
 }
 
-/** The engine-wide generator behind GDScript's global `randf()`, `randi()`, `randf_range()`. */
+/**
+ * The engine-wide stream (core/math/math_funcs.cpp `default_rand`) behind GDScript's GLOBAL random
+ * functions — which are Math::…, not RandomNumberGenerator's methods, and draw differently:
+ *
+ *   randf()             Math::randf = (float)rand() / (float)UINT32_MAX — ONE word (a generator's
+ *                       randf takes two)
+ *   randf_range(a, b)   Math::random(double, double) = randd() × (b − a) + a in double — three words
+ *   randi(), randi_range(a, b)   one word (bounded by rejection), like the generator's
+ *
+ * Getting the word counts right is what keeps every later draw — banner waves, flame seeds, piece idle
+ * phases, particle seeds, shard flights — in step with the original (_oracle/global_random.json).
+ */
 export const globalRng = new RandomNumberGenerator();
-export const randf = () => globalRng.randf();
+/** (float)UINT32_MAX: 4294967295 rounds up to 2³², so the quotient is an exact power-of-two scaling. */
+const UINT32_MAX_F = F(4294967295);
+export const randf = () => F(F(globalRng.randi()) / UINT32_MAX_F);
 export const randi = () => globalRng.randi();
-export const randf_range = (a, b) => globalRng.randf_range(a, b);
+export const randf_range = (a, b) => globalRng.randd() * (b - a) + a;
 export const randi_range = (a, b) => globalRng.randi_range(a, b);
+
+/**
+ * Runs `build` without the engine-wide stream noticing: whatever it draws is taken from where the
+ * stream stands and then handed back, so the next draw is the one the original would make. For work
+ * the shipped desktop build never does (the web export's shader warm-up). O(1) around `build`.
+ */
+export function outsideGlobalStream(build) {
+  const saved = globalRng.state;
+  try {
+    return build();
+  } finally {
+    globalRng.state = saved;
+  }
+}
 
 /**
  * GDScript `hash(String)` / `hash(StringName)` — djb2 over UTF-32 code points (Godot's String::hash).

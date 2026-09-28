@@ -3,7 +3,7 @@
  * Panel, Range / HSlider, ScrollBar / VScrollBar, ScrollContainer, LineEdit and RichTextLabel — each
  * with the engine's minimum size, drawing and input rules.
  */
-import { Color } from '../math.js';
+import { Color, F, TAU, colorByte } from '../math.js';
 import { Signal } from '../signal.js';
 import { SceneTree } from '../scene.js';
 import { Control, MOUSE_FILTER, FOCUS, CURSOR, SIZE, Gui, ANCHOR_END, SIDE_LEFT, SIDE_TOP, SIDE_RIGHT, SIDE_BOTTOM } from './control.js';
@@ -38,25 +38,94 @@ export class ImageTexture {
   }
 }
 
+export const GRADIENT_FILL = Object.freeze({ LINEAR: 0, RADIAL: 1, SQUARE: 2, CONIC: 3 });
+export const GRADIENT_REPEAT = Object.freeze({ NONE: 0, REPEAT: 1, MIRROR: 2 });
+/** Geometry2D::get_closest_point_to_segment_uncapped: a shorter segment counts as a point. */
+const DEGENERATE_SEGMENT = F(1e-20);
+
+/** Vector2::length in single precision. */
+const length2 = (x, y) => F(Math.sqrt(F(F(x * x) + F(y * y))));
+
 /**
- * GradientTexture2D (linear fill): texel (x, y) samples the gradient at the projection of
- * (x/(w−1), y/(h−1)) on fill_from→fill_to, clamped (REPEAT_NONE), stored as RGBA8.
+ * GradientTexture2D::_get_gradient_offset_at — where texel (x, y) of a width × height texture falls
+ * on the gradient, in the engine's single precision (Vector2 is float; the conic angle and the
+ * mirror fold are computed in double, as there). O(1).
  */
-export function gradientTexture2D(gradient, { width = 64, height = 64, fillFrom = { x: 0, y: 0 }, fillTo = { x: 1, y: 0 } } = {}) {
+function gradientOffsetAt(x, y, width, height, from, to, fill, repeat) {
+  if (from.x === to.x && from.y === to.y) return 0;
+  const px = width > 1 ? F(x / (width - 1)) : 0;
+  const py = height > 1 ? F(y / (height - 1)) : 0;
+  const nx = F(to.x - from.x);
+  const ny = F(to.y - from.y);
+  const qx = F(px - from.x);
+  const qy = F(py - from.y);
+  let ofs = 0;
+  switch (fill) {
+    case GRADIENT_FILL.LINEAR: {
+      // The texel projected on the (unbounded) line through the segment, signed along it.
+      const l2 = F(F(nx * nx) + F(ny * ny));
+      let cx = 0;
+      let cy = 0;
+      if (!(l2 < DEGENERATE_SEGMENT)) {
+        const d = F(F(F(nx * qx) + F(ny * qy)) / l2);
+        cx = F(F(from.x + F(nx * d)) - from.x);
+        cy = F(F(from.y + F(ny * d)) - from.y);
+      }
+      ofs = F(length2(cx, cy) / length2(nx, ny));
+      if (F(F(cx * nx) + F(cy * ny)) < 0) ofs = -ofs;
+      break;
+    }
+    case GRADIENT_FILL.RADIAL:
+      ofs = F(length2(qx, qy) / length2(nx, ny));
+      break;
+    case GRADIENT_FILL.SQUARE:
+      ofs = F(Math.max(Math.abs(qx), Math.abs(qy)) / Math.max(Math.abs(nx), Math.abs(ny)));
+      break;
+    case GRADIENT_FILL.CONIC: {
+      // Vector2::angle_to = atan2f(cross, dot): libm's last bit may differ from the engine's.
+      const angle = F(Math.atan2(F(F(nx * qy) - F(ny * qx)), F(F(nx * qx) + F(ny * qy))));
+      const wrapped = angle % TAU;
+      ofs = F((wrapped < 0 ? wrapped + TAU : wrapped) / TAU);
+      break;
+    }
+    default:
+      throw new Error(`unknown gradient fill ${fill}`);
+  }
+  switch (repeat) {
+    case GRADIENT_REPEAT.NONE:
+      return Math.min(Math.max(ofs, 0), 1);
+    case GRADIENT_REPEAT.REPEAT: {
+      const folded = ofs % 1;
+      return folded < 0 ? F(1 + folded) : folded;
+    }
+    case GRADIENT_REPEAT.MIRROR: {
+      const folded = Math.abs(ofs) % 2;
+      return folded > 1 ? F(2 - folded) : folded;
+    }
+    default:
+      throw new Error(`unknown gradient repeat ${repeat}`);
+  }
+}
+
+/**
+ * GradientTexture2D (LDR): every texel is the gradient at its offset, each channel stored as
+ * Color::get_r8 (rounded in single precision). O(width × height × log points).
+ */
+export function gradientTexture2D(gradient, {
+  width = 64, height = 64, fillFrom = { x: 0, y: 0 }, fillTo = { x: 1, y: 0 }, fill = GRADIENT_FILL.LINEAR, repeat = GRADIENT_REPEAT.NONE,
+} = {}) {
   const texture = new ImageTexture(width, height);
-  const dx = fillTo.x - fillFrom.x;
-  const dy = fillTo.y - fillFrom.y;
-  const lengthSq = dx * dx + dy * dy;
-  const color = [0, 0, 0, 0];
+  const from = { x: F(fillFrom.x), y: F(fillFrom.y) };
+  const to = { x: F(fillTo.x), y: F(fillTo.y) };
+  const pixels = texture.pixels;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const px = width > 1 ? x / (width - 1) : 0;
-      const py = height > 1 ? y / (height - 1) : 0;
-      let ofs = 0;
-      if (lengthSq > 0) ofs = ((px - fillFrom.x) * dx + (py - fillFrom.y) * dy) / lengthSq;
-      ofs = Math.min(Math.max(ofs, 0), 1);
-      gradient.sampleInto(ofs, color);
-      texture.set_pixel(x, y, { r: color[0], g: color[1], b: color[2], a: color[3] });
+      const c = gradient.get_color_at_offset(gradientOffsetAt(x, y, width, height, from, to, fill, repeat));
+      const i = (y * width + x) * 4;
+      pixels[i] = colorByte(c.r);
+      pixels[i + 1] = colorByte(c.g);
+      pixels[i + 2] = colorByte(c.b);
+      pixels[i + 3] = colorByte(c.a);
     }
   }
   return texture;
@@ -172,7 +241,7 @@ export class HSlider extends Range {
 
   _grabber() {
     if (!this.editable) return this.get_theme_icon('grabber_disabled');
-    return this._mouseInside || this.has_focus() ? this.get_theme_icon('grabber_highlight') : this.get_theme_icon('grabber');
+    return this._mouseInside || this.has_focus(true) ? this.get_theme_icon('grabber_highlight') : this.get_theme_icon('grabber');
   }
 
   _valueAt(x) {
@@ -215,7 +284,7 @@ export class HSlider extends Range {
     const size = { x: Math.trunc(this.size.x), y: Math.trunc(this.size.y) };
     const ratio = Number.isNaN(this.get_as_ratio()) ? 0 : this.get_as_ratio();
     const style = this.get_theme_stylebox('slider');
-    const highlighted = this.editable && (this._mouseInside || this.has_focus());
+    const highlighted = this.editable && (this._mouseInside || this.has_focus(true));
     const area = highlighted ? this.get_theme_stylebox('grabber_area_highlight') : this.get_theme_stylebox('grabber_area');
     const grabber = this._grabber();
     if (!style || !grabber) return;
@@ -478,7 +547,8 @@ export class LineEdit extends Control {
 
   _gui_input(event) {
     if (event.kind === 'mouse_button' && event.button_index === 1 && event.pressed) {
-      this.grab_focus();
+      // LineEdit::edit(hide_focus = true): a click edits; its box shows the focus anyway (setting 1).
+      if (!this.has_focus()) this.grab_focus(true);
       this.caret_column = this._columnAt(event.position.x);
       Gui.viewport?.textInput?.setCaret(this.caret_column);
       this.accept_event();
@@ -566,6 +636,7 @@ export class RichTextLabel extends Control {
 
   constructor() {
     super('RichTextLabel');
+    this.clip_contents = true;
     this.bbcode_enabled = false;
     this.fit_content = false;
     this.scroll_active = true;

@@ -4,7 +4,7 @@
  * for mouse picking, a pulsing threat ring, the tier-3 gold halo with sparks, and every animation the
  * battle plays (travel, bounce, shatter, promote, evolve, sink, topple, drop-in).
  */
-import { Vector2, Vector3, Color, lerpf, fposmod, deg_to_rad, clampi } from '../godot/math.js';
+import { AABB, Vector2, Vector3, Color, lerpf, fposmod, deg_to_rad, clampi } from '../godot/math.js';
 import { Node3D, MeshInstance3D } from '../godot/node3d.js';
 import { randf, randf_range } from '../godot/rng.js';
 import { TRANS, EASE } from '../godot/tween.js';
@@ -228,6 +228,7 @@ export class PieceView extends Node3D {
     const sparks = new GPUParticles3D();
     sparks.amount = 14;
     sparks.lifetime = 1.6;
+    sparks.visibility_aabb = new AABB(new Vector3(-1, -1, -1), new Vector3(2, 3, 2));
     const process = new ParticleProcessMaterial();
     process.emission_shape = EMISSION_SHAPE.RING;
     process.emission_ring_axis = Vector3.UP;

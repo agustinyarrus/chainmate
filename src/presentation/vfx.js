@@ -3,7 +3,7 @@
  * shockwave rings, point-light flashes, floating Label3D text, promotion pillars, dust.
  * Same parameters, tweens and randomness (Godot's global RNG) as the original.
  */
-import { Vector3, Color, Vector2 } from '../godot/math.js';
+import { AABB, Vector3, Color, Vector2 } from '../godot/math.js';
 import { Node3D, MeshInstance3D, OmniLight3D } from '../godot/node3d.js';
 import { isInstanceValid } from '../godot/scene.js';
 import { randf, randf_range } from '../godot/rng.js';
@@ -50,6 +50,7 @@ export class Vfx extends Node3D {
     flame.amount = 36;
     flame.lifetime = 0.9;
     flame.position = new Vector3(0, 0.22, 0);
+    flame.visibility_aabb = new AABB(new Vector3(-1, -0.5, -1), new Vector3(2, 3, 2));
     const process = new ParticleProcessMaterial();
     process.emission_shape = EMISSION_SHAPE.SPHERE;
     process.emission_sphere_radius = 0.14;
@@ -134,6 +135,7 @@ export class Vfx extends Node3D {
     particles.amount = amount;
     particles.lifetime = 0.8;
     particles.position = origin;
+    particles.visibility_aabb = new AABB(new Vector3(-4, -2, -4), new Vector3(8, 6, 8));
     const process = new ParticleProcessMaterial();
     process.emission_shape = EMISSION_SHAPE.SPHERE;
     process.emission_sphere_radius = 0.15;
@@ -155,6 +157,7 @@ export class Vfx extends Node3D {
     this.add_child(particles);
     particles.emitting = true;
     particles.finished.connect(() => particles.queue_free());
+    return particles;
   }
 
   ring(origin, color, radius = 1.3, duration = 0.55) {
@@ -265,7 +268,8 @@ export class Vfx extends Node3D {
     hold.add_child(ringNode);
     const label = this.float_text(at, '+1', new Color(1, 1, 1, 0), 60, 0.0, 0.3);
     label.modulate = new Color(label.modulate, 0.0);
-    this.burst(at, Color.WHITE, 1, 0.01, 0.05);
+    // Named so the state trace (dev/trace.js) can tell the warm-up's draws from the game's.
+    this.burst(at, Color.WHITE, 1, 0.01, 0.05).name = 'WarmUpBurst';
     return hold;
   }
 

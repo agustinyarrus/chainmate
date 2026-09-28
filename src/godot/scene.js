@@ -213,11 +213,14 @@ export class SceneTree {
   /**
    * Main::iteration — the physics frames due by now, then one idle frame; the caller renders next.
    * Physics time accumulates at a fixed 1/60 s; a stalled frame runs at most 8 physics frames and
-   * drops the rest (Godot slows down instead of spiralling). O(nodes + timers + tweens).
+   * drops the rest (Godot slows down instead of spiralling). `timeScale` is Engine.time_scale: the
+   * frame takes `step` seconds of real time and simulates `step × timeScale`; physics frames follow
+   * real time. O(nodes + timers + tweens).
    */
-  iteration(delta) {
+  iteration(step, timeScale = 1) {
     const tick = 1 / PHYSICS_TICKS_PER_SECOND;
-    this._physicsTime += delta;
+    const delta = step * timeScale;
+    this._physicsTime += step;
     let steps = Math.floor(this._physicsTime / tick + 1e-9);
     if (steps > MAX_PHYSICS_STEPS_PER_FRAME) {
       steps = MAX_PHYSICS_STEPS_PER_FRAME;
@@ -293,9 +296,12 @@ export class SceneTree {
     for (const tween of Array.from(this.tweens)) tween.step(delta);
   }
 
-  /** Render-time systems (Godot updates particles in the rendering step, after the frame's logic). */
-  preRender(delta) {
-    for (const hook of Array.from(this.renderHooks)) hook(delta);
+  /**
+   * Render-time systems (Godot updates particles in the rendering step, after the frame's logic).
+   * `view` ({ frustum }) is the frame's camera; systems that cull by it treat its absence as "in view".
+   */
+  preRender(delta, view = null) {
+    for (const hook of Array.from(this.renderHooks)) hook(delta, view);
   }
 
   /** After the frame is drawn: RenderingServer.frame_post_draw. */

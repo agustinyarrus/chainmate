@@ -6,12 +6,17 @@
  * built-in drawing of the class (`_draw_self`) and then the script's `_draw()`, like NOTIFICATION_DRAW.
  * Draw order is tree order inside a CanvasLayer; layers draw by `layer` index.
  *
+ * Visibility follows CanvasItem::set_visible / _handle_visibility_change: an item is visible in the
+ * tree when it and every ancestor are visible; a change reaches each visible descendant as a
+ * "visibility changed" notification (the class hook `_visibility_changed()` after the signal), so
+ * containers that were hidden lay their children out when they are shown.
+ *
  * Transforms are 2D affines [a, b, c, d, tx, ty]: x' = a·x + c·y + tx, y' = b·x + d·y + ty.
  */
 import { Color } from '../math.js';
 import { Node } from '../scene.js';
 import { Signal } from '../signal.js';
-import { Mesh2D, arc, circle, line, polygon, polyline, rect } from './geometry.js';
+import { Mesh2D, arc, ellipse, ellipseOutline, line, multiline, polygon, polyline, rect } from './geometry.js';
 
 export const IDENTITY = Object.freeze([1, 0, 0, 1, 0, 0]);
 
@@ -77,6 +82,9 @@ export class CanvasItem extends Node {
     this._selfModulate = new Color(1, 1, 1, 1);
     this.z_index = 0;
     this.visibility_changed = new Signal();
+    this.hidden = new Signal();
+    /** Whether every ancestor is visible; false until the item enters the tree. */
+    this._parentVisibleInTree = false;
     this.draw = new Signal();
     this.drawList = new DrawList();
     this._needsRedraw = true;
@@ -90,7 +98,11 @@ export class CanvasItem extends Node {
     on = Boolean(on);
     if (on === this._visible) return;
     this._visible = on;
-    this._visibilityChanged();
+    if (!this._parentVisibleInTree) {
+      this._notifyVisibilityChanged();
+      return;
+    }
+    this._handleVisibilityChange(on);
   }
   show() {
     this.visible = true;
@@ -102,18 +114,39 @@ export class CanvasItem extends Node {
     return this._visible;
   }
   is_visible_in_tree() {
-    if (!this._inside) return false;
-    for (let node = this; node; node = node.parent) {
-      if (node._visible === false) return false;
-      if (node instanceof CanvasLayer) return node.visible !== false;
-    }
-    return true;
+    return this._visible && this._parentVisibleInTree;
   }
 
-  _visibilityChanged() {
-    this.queue_redraw();
+  /** NOTIFICATION_ENTER_TREE: inherit the parent's visibility; an item counts as hidden until now. */
+  _enter_tree() {
+    const parent = this.parent;
+    if (parent instanceof CanvasItem) this._parentVisibleInTree = parent.is_visible_in_tree();
+    else if (parent instanceof CanvasLayer) this._parentVisibleInTree = parent.visible;
+    else this._parentVisibleInTree = true;
+    this._needsRedraw = true;
+    if (this.is_visible_in_tree()) this._notifyVisibilityChanged();
+  }
+
+  _exit_tree() {
+    this._parentVisibleInTree = false;
+  }
+
+  _handleVisibilityChange(visible) {
+    this._notifyVisibilityChanged();
+    if (visible) this.queue_redraw();
+    else this.hidden.emit();
+    for (const child of this.children.slice()) if (child instanceof CanvasItem) child._propagateVisibilityChanged(visible);
+  }
+
+  _propagateVisibilityChanged(parentVisibleInTree) {
+    this._parentVisibleInTree = parentVisibleInTree;
+    if (this._visible) this._handleVisibilityChange(parentVisibleInTree);
+  }
+
+  /** NOTIFICATION_VISIBILITY_CHANGED: the signal first, then the classes from base to derived. */
+  _notifyVisibilityChanged() {
     this.visibility_changed.emit();
-    this._propagateVisibility?.();
+    this._visibility_changed?.();
   }
 
   get modulate() {
@@ -141,6 +174,11 @@ export class CanvasItem extends Node {
     return m;
   }
 
+  /** The canvas transform is the identity here: positions are already in canvas units. */
+  get_global_transform_with_canvas() {
+    return this.get_global_transform();
+  }
+
   queue_redraw() {
     this._needsRedraw = true;
   }
@@ -164,9 +202,9 @@ export class CanvasItem extends Node {
     const h = Math.abs(r.h);
     const list = this.drawList;
     if (filled) {
-      rect(list.mesh, x, y, w, h, color);
+      rect(list.mesh, x, y, w, h, color, antialiased);
     } else if (width >= w || width >= h) {
-      rect(list.mesh, x - 0.5 * width, y - 0.5 * width, w + width, h + width, color);
+      rect(list.mesh, x - 0.5 * width, y - 0.5 * width, w + width, h + width, color, antialiased);
     } else {
       const points = [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }, { x, y }];
       polyline(list.mesh, list.lines, points, [color], width, antialiased);
@@ -185,6 +223,11 @@ export class CanvasItem extends Node {
     polyline(this.drawList.mesh, this.drawList.lines, points, colors, width, antialiased);
   }
 
+  /** draw_multiline(points, color, width, antialiased): independent segments, points in pairs. */
+  draw_multiline(points, color, width = -1, antialiased = false) {
+    multiline(this.drawList.mesh, this.drawList.lines, points, [color], width, antialiased);
+  }
+
   draw_colored_polygon(points, color) {
     polygon(this.drawList.mesh, points, [color]);
   }
@@ -195,8 +238,15 @@ export class CanvasItem extends Node {
 
   /** draw_circle(position, radius, color, filled = true, width = -1, antialiased = false) */
   draw_circle(center, radius, color, filled = true, width = -1, antialiased = false) {
-    if (filled) circle(this.drawList.mesh, this.drawList.lines, center, radius, color, antialiased);
-    else arc(this.drawList.mesh, this.drawList.lines, center, radius, 0, Math.PI * 2, 64, color, width, antialiased);
+    this.draw_ellipse(center, radius, radius, color, filled, width, antialiased);
+  }
+
+  /** CanvasItem::draw_ellipse: filled, or an outline too wide to have a hole, or a rim polyline. */
+  draw_ellipse(center, major, minor, color, filled = true, width = -1, antialiased = false) {
+    const list = this.drawList;
+    if (filled) ellipse(list.mesh, center, major, minor, color, antialiased);
+    else if (width >= 2.0 * Math.max(major, minor)) ellipse(list.mesh, center, major + 0.5 * width, minor + 0.5 * width, color, antialiased);
+    else ellipseOutline(list.mesh, list.lines, center, major, minor, color, width, antialiased);
   }
 
   draw_arc(center, radius, startAngle, endAngle, pointCount, color, width = -1, antialiased = false) {
@@ -223,6 +273,20 @@ export class CanvasLayer extends Node {
   constructor(layer = 1) {
     super('CanvasLayer');
     this.layer = layer;
-    this.visible = true;
+    this._visible = true;
+  }
+
+  get visible() {
+    return this._visible;
+  }
+  /** CanvasLayer::set_visible: the layer's items learn that their parent changed. */
+  set visible(on) {
+    on = Boolean(on);
+    if (on === this._visible) return;
+    this._visible = on;
+    for (const child of this.children.slice()) if (child instanceof CanvasItem) child._propagateVisibilityChanged(on);
+  }
+  is_visible() {
+    return this._visible;
   }
 }

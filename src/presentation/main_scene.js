@@ -13,7 +13,7 @@ import { Node3D } from '../godot/node3d.js';
 import { isInstanceValid } from '../godot/scene.js';
 import { go } from '../godot/coroutine.js';
 import { OS } from '../godot/os.js';
-import { RandomNumberGenerator } from '../godot/rng.js';
+import { RandomNumberGenerator, outsideGlobalStream } from '../godot/rng.js';
 import { CanvasLayer } from '../godot/ui/canvas_item.js';
 import { Control, MOUSE_FILTER, PRESET } from '../godot/ui/control.js';
 import { MOUSE_BUTTON } from '../godot/input.js';
@@ -119,23 +119,29 @@ export class Main extends Node3D {
   /**
    * The web build's shader warm-up: one of each prop, a relic and every effect, under the floor for
    * four frames, so the first capture or relic does not stall on a shader compile.
+   *
+   * The shipped desktop build never runs it (only its web export does), so everything it builds draws
+   * outside the engine-wide stream: banner waves, flame seeds, particle seeds and piece idle phases
+   * stay the .exe's, draw for draw.
    */
   *_warm_up_shaders() {
     const hold = new Node3D('ShaderWarmUp');
     hold.position = new Vector3(0, -0.7, 0);
     this.add_child(hold);
-    const rng = new RandomNumberGenerator();
-    const props = [ArenaProps.crate(0.3), ArenaProps.books(rng), ArenaProps.banner(0.5, Palette.CAPTURE, Palette.GOLD),
-      ArenaProps.hanging_cloth(0.3, 0.3, Palette.CAPTURE, Palette.GOLD, true)];
-    for (const lit of [ArenaProps.lantern(), ArenaProps.candelabra(), ArenaProps.candles(rng)]) {
-      props.push(lit.node);
-      for (const light of lit.lights) light.visible = false;
-    }
-    for (const prop of props) hold.add_child(prop);
-    const relic = new RelicView();
-    hold.add_child(relic);
-    relic.setup('fianchetto_glass');
-    const effects = this.vfx.warm_up(hold.position);
+    const effects = outsideGlobalStream(() => {
+      const rng = new RandomNumberGenerator();
+      const props = [ArenaProps.crate(0.3), ArenaProps.books(rng), ArenaProps.banner(0.5, Palette.CAPTURE, Palette.GOLD),
+        ArenaProps.hanging_cloth(0.3, 0.3, Palette.CAPTURE, Palette.GOLD, true)];
+      for (const lit of [ArenaProps.lantern(), ArenaProps.candelabra(), ArenaProps.candles(rng)]) {
+        props.push(lit.node);
+        for (const light of lit.lights) light.visible = false;
+      }
+      for (const prop of props) hold.add_child(prop);
+      const relic = new RelicView();
+      hold.add_child(relic);
+      relic.setup('fianchetto_glass');
+      return this.vfx.warm_up(hold.position);
+    });
     for (let i = 0; i < 4; i++) yield this.tree.process_frame;
     hold.queue_free();
     effects.queue_free();

@@ -45,6 +45,9 @@ const approxEqual = (a, b) => Math.abs(a - b) < 1e-5;
 /** The GUI viewport (focus, hover, input) — set by viewport.js. */
 export const Gui = { viewport: null };
 
+/** Rotations closer than this to a multiple of 45° still snap to pixels (the engine's workaround). */
+const SNAP_ROTATION_EPSILON = 0.00001;
+
 export class Control extends CanvasItem {
   /** Godot class name used for theme lookups (subclasses override). */
   static themeType = 'Control';
@@ -90,6 +93,7 @@ export class Control extends CanvasItem {
   // ─────────────────────────────────────────────────────────────── tree hooks ────────────────────
 
   _enter_tree() {
+    super._enter_tree();
     // Parents enter first, so the ancestors' themes and sizes are already current (each child gets its own call).
     this._themeCache.clear();
     this._minCache = null;
@@ -99,7 +103,18 @@ export class Control extends CanvasItem {
   }
 
   _exit_tree() {
+    super._exit_tree();
     Gui.viewport?._controlExited(this);
+  }
+
+  /** Control's NOTIFICATION_VISIBILITY_CHANGED: leave the GUI state when hidden, refit when shown. */
+  _visibility_changed() {
+    if (!this.is_visible_in_tree()) {
+      Gui.viewport?._controlHidden(this);
+    } else {
+      this.update_minimum_size();
+      this._size_changed();
+    }
   }
 
   /** The Control parent (null for top-level controls under a CanvasLayer / non-Control). */
@@ -234,6 +249,17 @@ export class Control extends CanvasItem {
     const px = this._pivot.x;
     const py = this._pivot.y;
     return [a, b, cc, d, this._pos.x + px - (a * px + cc * py), this._pos.y + py - (b * px + d * py)];
+  }
+
+  /**
+   * The transform the control is DRAWN with (Control::_update_canvas_item_transform): its origin
+   * snapped to whole units — gui/common/snap_controls_to_pixels — unless the control is rotated.
+   * Layout and hit testing keep the exact transform.
+   */
+  get_draw_transform() {
+    const m = this.get_transform();
+    if (!this._inside || Math.abs(Math.sin(this._rotation * 4.0)) >= SNAP_ROTATION_EPSILON) return m;
+    return [m[0], m[1], m[2], m[3], Math.floor(Math.fround(Math.fround(m[4]) + 0.5)), Math.floor(Math.fround(Math.fround(m[5]) + 0.5))];
   }
 
   // offsets / anchors as properties
@@ -462,22 +488,60 @@ export class Control extends CanvasItem {
 
   // ─────────────────────────────────────────────────────────────── focus & input ─────────────────
 
-  has_focus() {
-    return Gui.viewport?.focusOwner === this;
+  /**
+   * Control::has_focus(ignore_hidden_focus). A focus taken with the pointer is hidden: drawing code
+   * that asks with `true` (a button's focus box) does not see it; scripts asking plainly do.
+   */
+  has_focus(ignoreHiddenFocus = false) {
+    return this._inside && Gui.viewport !== null && Gui.viewport.hasFocus(this, ignoreHiddenFocus);
   }
 
-  grab_focus() {
-    if (this.focus_mode === FOCUS.NONE || !this.is_visible_in_tree()) return;
-    Gui.viewport?.setFocus(this);
+  /** Control::grab_focus(hide_focus). Needs a focus mode; visibility is checked when keys arrive. */
+  grab_focus(hideFocus = false) {
+    if (!this._inside || this.focus_mode === FOCUS.NONE) return;
+    Gui.viewport?.grabFocus(this, hideFocus);
   }
 
   release_focus() {
-    if (this.has_focus()) Gui.viewport?.setFocus(null);
+    if (this.has_focus()) Gui.viewport?.releaseFocus();
   }
 
-  /** Marks the current GUI event handled (stops propagation to parents). */
+  /** Control::_is_focusable: visible and with a focus mode that mouse or keys can give. */
+  _is_focusable() {
+    return this.is_visible_in_tree() && (this.focus_mode === FOCUS.ALL || this.focus_mode === FOCUS.CLICK);
+  }
+
+  /** Marks the current GUI event handled (stops propagation to parents and to _unhandled_input). */
   accept_event() {
     Gui.viewport?.acceptEvent();
+  }
+
+  /**
+   * Control::_call_gui_input: the gui_input signal first (so a listener may accept the event), then
+   * the control's own handling unless the event was handled. Internal events skip the signal.
+   */
+  _call_gui_input(event) {
+    const viewport = Gui.viewport;
+    if (!event.internal) this.gui_input.emit(event);
+    if (!this._inside || viewport?._handled) return;
+    this._gui_input?.(event);
+  }
+
+  /** Control::get_cursor_shape(at_position). */
+  get_cursor_shape(_point) {
+    return this.mouse_default_cursor_shape;
+  }
+
+  /** NOTIFICATION_MOUSE_ENTER / _EXIT: the viewport emits mouse_entered / mouse_exited right after. */
+  _notify_mouse_enter() {}
+  _notify_mouse_exit() {}
+
+  /** NOTIFICATION_FOCUS_ENTER / _EXIT: what Control does is announce it. */
+  _notify_focus_enter() {
+    this.focus_entered.emit();
+  }
+  _notify_focus_exit() {
+    this.focus_exited.emit();
   }
 
   /** Control::get_tooltip(at_position) */
@@ -502,12 +566,6 @@ export class Control extends CanvasItem {
   get_canvas_layer() {
     for (let node = this.parent; node; node = node.parent) if (node instanceof CanvasLayer) return node;
     return null;
-  }
-
-  _visibilityChanged() {
-    super._visibilityChanged();
-    if (!this._visible) Gui.viewport?._controlHidden(this);
-    this.get_parent_control()?._childVisibilityChanged?.(this);
   }
 
   get_global_transform() {

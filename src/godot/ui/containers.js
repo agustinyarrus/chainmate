@@ -67,6 +67,12 @@ export class Container extends Control {
     this.queue_sort();
   }
 
+  /** Container's NOTIFICATION_VISIBILITY_CHANGED: a container that becomes visible sorts again. */
+  _visibility_changed() {
+    super._visibility_changed();
+    if (this.is_visible_in_tree()) this.queue_sort();
+  }
+
   _resized() {
     this.queue_sort();
   }

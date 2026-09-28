@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Chainmate</title>
+  <!-- The crown of scripts/presentation/ui/icons.gd (_crown), point for point: centre (256, 233),
+       radius 170, the game's own colours, on the menu's night backdrop. Kept inside the central
+       circle of radius 205 so it survives Android's adaptive (maskable) crops. -->
+  <defs>
+    <radialGradient id="night" cx="50%" cy="42%" r="70%">
+      <stop offset="0" stop-color="#16202f"/>
+      <stop offset="1" stop-color="#07090d"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#night)"/>
+  <rect x="22" y="22" width="468" height="468" rx="94" fill="none" stroke="#d4a24e" stroke-opacity="0.22" stroke-width="4"/>
+  <ellipse cx="256" cy="379.2" rx="122.4" ry="20.4" fill="#000000" fill-opacity="0.35"/>
+  <polygon points="133.6,318 133.6,182 194.8,236.4 256,148 317.2,236.4 378.4,182 378.4,318" fill="#e0ad55"/>
+  <polygon points="256,148 317.2,236.4 378.4,182 378.4,318 256,318" fill="#b5843c"/>
+  <polygon points="133.6,290.8 378.4,290.8 378.4,328.2 133.6,328.2" fill="#8a5a22"/>
+  <circle cx="133.6" cy="165" r="17" fill="#ffe6a6"/>
+  <circle cx="256" cy="131" r="17" fill="#ffe6a6"/>
+  <circle cx="378.4" cy="165" r="17" fill="#ffe6a6"/>
+  <circle cx="256" cy="256.8" r="20.4" fill="#d0453a"/>
+  <circle cx="188" cy="267" r="13.6" fill="#4f8dff"/>
+  <circle cx="324" cy="267" r="13.6" fill="#4f8dff"/>
+</svg>

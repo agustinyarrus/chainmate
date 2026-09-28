@@ -12,6 +12,17 @@ import { AUTOWRAP, Paragraph, autowrapFlags, lineRuns } from './text.js';
 export const DRAW_MODE = Object.freeze({ NORMAL: 0, PRESSED: 1, HOVER: 2, DISABLED: 3, HOVER_PRESSED: 4 });
 export const ACTION_MODE = Object.freeze({ PRESS: 0, RELEASE: 1 });
 
+/** BaseButton.button_mask: the mouse buttons that press it (MOUSE_BUTTON_MASK_LEFT). */
+const LEFT_BUTTON_MASK = 1;
+const buttonMaskOf = (button) => 1 << (button - 1);
+
+/**
+ * BaseButton — Godot 4.7's (scene/gui/base_button.cpp): the hover comes from the viewport's mouse-over
+ * notifications; a mouse press only starts pressing a button the pointer is over, ui_accept presses the
+ * focused one; the action fires on release (or press, by action_mode) while the press stays inside;
+ * leaving the focus, hiding or leaving the tree drops a press in progress. The button does not accept
+ * the event: mouse events stop at it because it is a STOP control, keys go on to _unhandled_input.
+ */
 export class BaseButton extends Control {
   static themeType = 'BaseButton';
 
@@ -22,22 +33,66 @@ export class BaseButton extends Control {
     this.toggle_mode = false;
     this.action_mode = ACTION_MODE.RELEASE;
     this.keep_pressed_outside = false;
+    this.button_mask = LEFT_BUTTON_MASK;
     this._disabled = false;
+    // BaseButton::status
     this._pressed = false;
     this._hovering = false;
     this._pressAttempt = false;
     this._pressingInside = false;
+    this._pressedDownWithFocus = false;
     this.pressed = new Signal();
     this.toggled = new Signal();
     this.button_down = new Signal();
     this.button_up = new Signal();
-    this.mouse_entered.connect(() => this._setHover(true));
-    this.mouse_exited.connect(() => this._setHover(false));
   }
 
-  _setHover(on) {
-    this._hovering = on;
+  _notify_mouse_enter() {
+    this._hovering = true;
     this.queue_redraw();
+  }
+
+  _notify_mouse_exit() {
+    this._hovering = false;
+    this.queue_redraw();
+  }
+
+  _notify_focus_enter() {
+    super._notify_focus_enter();
+    this.queue_redraw();
+  }
+
+  /** NOTIFICATION_FOCUS_EXIT (sent reversed: the button settles before the signal goes out). */
+  _notify_focus_exit() {
+    if (this._pressAttempt) {
+      this._pressAttempt = false;
+      this.queue_redraw();
+    } else if (this._hovering) {
+      this.queue_redraw();
+    }
+    if (this._pressedDownWithFocus) {
+      this._pressedDownWithFocus = false;
+      this.button_up.emit();
+    }
+    super._notify_focus_exit();
+  }
+
+  /** NOTIFICATION_VISIBILITY_CHANGED (hidden) and NOTIFICATION_EXIT_TREE. */
+  _resetStatus() {
+    if (!this.toggle_mode) this._pressed = false;
+    this._hovering = false;
+    this._pressAttempt = false;
+    this._pressingInside = false;
+  }
+
+  _visibility_changed() {
+    super._visibility_changed();
+    if (!this.is_visible_in_tree()) this._resetStatus();
+  }
+
+  _exit_tree() {
+    super._exit_tree();
+    this._resetStatus();
   }
 
   get disabled() {
@@ -48,15 +103,21 @@ export class BaseButton extends Control {
     if (on === this._disabled) return;
     this._disabled = on;
     if (on) {
+      if (!this.toggle_mode) this._pressed = false;
       this._pressAttempt = false;
       this._pressingInside = false;
+      if (this._pressedDownWithFocus) {
+        this._pressedDownWithFocus = false;
+        this.button_up.emit();
+      }
     }
     this.queue_redraw();
     this.update_minimum_size();
   }
 
+  /** BaseButton::is_pressed: the toggle state, or a press in progress for plain buttons. */
   get button_pressed() {
-    return this._pressed;
+    return this.toggle_mode ? this._pressed : this._pressAttempt;
   }
   set button_pressed(on) {
     on = Boolean(on);
@@ -67,8 +128,13 @@ export class BaseButton extends Control {
   }
 
   set_pressed_no_signal(on) {
+    if (!this.toggle_mode) return;
     this._pressed = Boolean(on);
     this.queue_redraw();
+  }
+
+  is_pressing() {
+    return this._pressAttempt;
   }
 
   get_draw_mode() {
@@ -86,64 +152,69 @@ export class BaseButton extends Control {
     return this._hovering;
   }
 
-  /** BaseButton::_pressed / toggle and signals. */
+  /** BaseButton::_toggled then _pressed (virtual hooks, then the signals). */
   _activate() {
     if (this.toggle_mode) {
       this._pressed = !this._pressed;
+      this._toggled_virtual?.(this._pressed);
       this.toggled.emit(this._pressed);
     }
     this._pressed_virtual?.();
     this.pressed.emit();
   }
 
-  /** gui_input for mouse (left button) and ui_accept, honouring the action mode. */
+  /** BaseButton::gui_input. */
+  _gui_input(event) {
+    this._gui_input_base(event);
+  }
+
   _gui_input_base(event) {
-    if (this._disabled) return false;
-    const isMouse = event.kind === 'mouse_button' && event.button_index === 1;
-    const isAccept = (event.kind === 'key' || event.kind === 'joy_button') && event.is_action('ui_accept') && !event.echo;
-    if (event.kind === 'mouse_motion' && this._pressAttempt) {
+    if (this._disabled) return;
+    const mouseButton = event.kind === 'mouse_button';
+    const uiAccept = event.is_action('ui_accept') && !event.echo;
+    const masked = mouseButton && (this.button_mask & buttonMaskOf(event.button_index)) !== 0;
+    if (masked || uiAccept) {
+      this._onActionEvent(event, mouseButton);
+    } else if (event.kind === 'mouse_motion' && this._pressAttempt) {
       const inside = this.has_point(event.position);
       if (inside !== this._pressingInside) {
         this._pressingInside = inside;
         this.queue_redraw();
       }
-      return false;
     }
-    if (!isMouse && !isAccept) return false;
-    if (event.pressed) {
+  }
+
+  /** BaseButton::on_action_event. */
+  _onActionEvent(event, fromMouse) {
+    if (event.pressed && (!fromMouse || this._hovering)) {
       this._pressAttempt = true;
       this._pressingInside = true;
-      this.button_down.emit();
-      if (this.action_mode === ACTION_MODE.PRESS) {
-        this._pressAttempt = false;
+      if (!this._pressedDownWithFocus) {
+        this._pressedDownWithFocus = true;
+        this.button_down.emit();
+      }
+    }
+    if (this._pressAttempt && this._pressingInside) {
+      const fires = (event.pressed && this.action_mode === ACTION_MODE.PRESS) || (!event.pressed && this.action_mode === ACTION_MODE.RELEASE);
+      if (fires) {
+        if (this.action_mode === ACTION_MODE.PRESS) {
+          this._pressAttempt = false;
+          this._pressingInside = false;
+        }
         this._activate();
       }
-      this.queue_redraw();
-    } else {
-      if (this._pressAttempt && this._pressingInside) this._activate();
+    }
+    if (!event.pressed) {
       this._pressAttempt = false;
       this._pressingInside = false;
-      this.button_up.emit();
-      this.queue_redraw();
+      if (this._pressedDownWithFocus) {
+        this._pressedDownWithFocus = false;
+        this.button_up.emit();
+      }
     }
-    this.accept_event();
-    return true;
-  }
-
-  _gui_input(event) {
-    this._gui_input_base(event);
-  }
-
-  _focusLost() {
-    if (this._pressAttempt && !isMouseHeld()) {
-      this._pressAttempt = false;
-      this._pressingInside = false;
-      this.queue_redraw();
-    }
+    this.queue_redraw();
   }
 }
-
-const isMouseHeld = () => Gui.viewport?.mouseButtonsHeld > 0;
 
 export class Button extends BaseButton {
   static themeType = 'Button';
@@ -210,7 +281,8 @@ export class Button extends BaseButton {
   _fontColor() {
     switch (this.get_draw_mode()) {
       case DRAW_MODE.NORMAL:
-        return this.has_focus() ? this.get_theme_color('font_focus_color') : this.get_theme_color('font_color');
+        // Focus colours only take precedence over the normal state, and only for a visible focus.
+        return this.has_focus(true) ? this.get_theme_color('font_focus_color') : this.get_theme_color('font_color');
       case DRAW_MODE.HOVER_PRESSED:
         return this.get_theme_color('font_hover_pressed_color');
       case DRAW_MODE.PRESSED:
@@ -259,7 +331,7 @@ export class Button extends BaseButton {
     const size = this.size;
     const style = this._currentStylebox();
     if (!this.flat && style) this.draw_style_box(style, { x: 0, y: 0, w: size.x, h: size.y });
-    if (this.has_focus()) {
+    if (this.has_focus(true)) {
       const focus = this.get_theme_stylebox('focus');
       if (focus) this.draw_style_box(focus, { x: 0, y: 0, w: size.x, h: size.y });
     }

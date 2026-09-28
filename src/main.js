@@ -8,11 +8,15 @@
  *   window   content scale follows the window (canvas_items / expand, 1600×900 × interface scale);
  *            the run is saved whenever the page is hidden or closed; a lost WebGL context reloads
  *
- * Query flags: `?capture` (the original's --capture tour), `?ephemeral`, `?app` (behave like the
- * desktop build inside a browser tab), `?stats` (frame statistics).
+ * Query flags: `?capture` (the original's --capture tour, see presentation/autopilot.js),
+ * `?ephemeral`, `?app` (behave like the desktop build inside a browser tab), `?stats` (frame
+ * statistics), `?fixed=60` (every frame simulates exactly 1/60 s — what the capture tour uses),
+ * `?rngseed=N` (the global random stream starts from N, like the oracle's seeded tours), `?trace`
+ * (with `?capture`: the tour's state trace, dev/trace.js).
  */
+import * as THREE from 'three';
 import { SceneTree } from './godot/scene.js';
-import { Coroutine } from './godot/coroutine.js';
+import { Coroutine, go } from './godot/coroutine.js';
 import { Camera3D } from './godot/node3d.js';
 import { Vector2 } from './godot/math.js';
 import { RenderPipeline } from './godot/render/pipeline.js';
@@ -25,18 +29,29 @@ import { FontRegistry, IconTexture, baseTheme } from './godot/ui/theme.js';
 import { Settings } from './autoload/settings.js';
 import { Profile } from './autoload/profile.js';
 import { Sfx } from './autoload/sfx.js';
+import { AudioEngine } from './audio/engine.js';
+import { loadRasterizer } from './godot/text/ftw.js';
+import { Glyphs } from './godot/text/glyphs.js';
 import { Fonts, loadFonts } from './presentation/ui/fonts.js';
 import { loadCredits } from './presentation/ui/screens.js';
-import { Main } from './presentation/main_scene.js';
+import { Main, Screen } from './presentation/main_scene.js';
+import { KEY } from './godot/input.js';
+import { OS, Engine } from './godot/os.js';
+import { globalRng } from './godot/rng.js';
 
 /** A frame never simulates more than this (a hidden tab or a stall must not skip whole animations). */
 const MAX_FRAME_DELTA = 0.1;
 /** Godot's rendering/limits/time/time_rollover_secs: shader TIME wraps here. */
 const TIME_ROLLOVER = 3600;
-const SHADOW_MAP_SIZE = 4096;
-/** Half extent of the key light's shadow frustum: the arena platform plus its dressing. */
-const SHADOW_EXTENT = 6.5;
 const STATS_INTERVAL_MS = 1000;
+/**
+ * Frames in a row that may throw before the loop stops: one bad frame (a module swapped mid-frame by
+ * the dev server) is survivable; a frame that always throws would repeat its error sixty times a second.
+ */
+const MAX_FAILED_FRAMES = 3;
+/** The capture tour runs at the original's window size and a steady 60 frames per simulated second. */
+const TOUR_WINDOW = Object.freeze({ width: 1600, height: 900 });
+const TOUR_FRAME_RATE = 60;
 
 /** Boot and frame phases — one explicit state instead of loose flags. */
 const AppState = Object.freeze({ BOOTING: 'booting', RUNNING: 'running', CONTEXT_LOST: 'context-lost', FAILED: 'failed' });
@@ -60,8 +75,37 @@ class App {
     this.shaderTime = 0;
     this.lastFrame = 0;
     this.errors = [];
+    /** Consecutive frames that threw (see MAX_FAILED_FRAMES). */
+    this.failedFrames = 0;
     this.stats = { fps: 0, frames: 0, since: 0, element: null };
+    /** Fixed simulation step in seconds, or 0 to follow the clock. */
+    this.fixedDelta = this.params.has('fixed') ? 1 / Math.max(1, Number(this.params.get('fixed')) || TOUR_FRAME_RATE) : 0;
+    /** Window size forced by the capture tour ({ width, height } in pixels), or null. */
+    this.windowOverride = null;
+    /** What the capture tour produced: read by e2e/tour.mjs. */
+    this.tour = { shots: [], log: [], done: false, failures: 0 };
+    /** The frame's camera as render-time systems see it (particles process only in view). */
+    this.renderView = { frustum: new THREE.Frustum(), viewProjection: new THREE.Matrix4() };
     this._frame = (now) => this.frame(now);
+  }
+
+  /** The capture tour's host (Autopilot.host): frames are kept as PNG data URLs until collected. */
+  tourHost() {
+    return {
+      capture: (name) => this.tour.shots.push({ name, width: this.pipeline.width, height: this.pipeline.height, url: this.canvas.toDataURL('image/png') }),
+      setWindowSize: (width, height) => {
+        this.windowOverride = { width, height };
+      },
+      finish: (failures) => {
+        this.tour.failures = failures;
+        this.tour.done = true;
+      },
+      log: (line) => {
+        this.tour.log.push(line);
+        console.info(line);
+      },
+      frameStats: () => ({ draws: this.pipeline.stats.drawCalls, triangles: this.pipeline.stats.triangles }),
+    };
   }
 
   async boot() {
@@ -73,12 +117,27 @@ class App {
       setUiScale: (scale) => this.setUiScale(scale),
     };
     Settings._ready();
+    // `?rngseed=N`: the engine-wide random stream (banner waves, candle flames, piece idle phases,
+    // shard flights) starts from N instead of the clock, where the oracle's seeded tours seed it.
+    if (this.params.has('rngseed')) globalRng.seed = Number(this.params.get('rngseed'));
     Profile._ready();
+    // Audio: the third autoload. A browser lets it sound from the first user gesture on.
+    this.audio = new AudioEngine({ tree: this.tree });
+    Sfx.attach(this.audio);
+    this.audio.followPage(window);
+    if (OS.get_cmdline_user_args().includes('--capture')) {
+      const { Autopilot } = await import('./presentation/autopilot.js');
+      Autopilot.host = this.tourHost();
+      Main.Autopilot = Autopilot;
+      this.windowOverride = { ...TOUR_WINDOW };
+      if (this.fixedDelta === 0) this.fixedDelta = 1 / TOUR_FRAME_RATE;
+    }
 
     this.pipeline = new RenderPipeline(this.canvas);
     this.sky = new SkyRenderer(this.pipeline);
     this.canvasRenderer = new CanvasRenderer(this.pipeline.renderer);
-    await Promise.all([loadFonts(), loadCredits(), this.canvasRenderer.preload(themeIcons())]);
+    const [rasterizer] = await Promise.all([loadRasterizer(), loadFonts(), loadCredits(), this.canvasRenderer.preload(themeIcons())]);
+    Glyphs.use(rasterizer);
     FontRegistry.fonts = Fonts;
 
     this.viewport = new GuiViewport(this.tree, { uiScale: () => this.uiScale });
@@ -91,9 +150,13 @@ class App {
     this.pipeline.scene.add(this.main.object3d);
     this.tree.root.add_child(this.main);
     this.main.rig.viewportSize = () => new Vector2(this.viewport.size.x, this.viewport.size.y);
-    const caster = this.main.arena.key_light.enableShadowCaster(SHADOW_MAP_SIZE, SHADOW_EXTENT);
-    this.pipeline.scene.add(caster, caster.target);
     lighting.environment = this.main.arena.environment;
+    if (this.params.has('probe')) await this.startProbe();
+    if (this.params.has('trace') && Main.Autopilot) {
+      // `?trace`: the port's half of the tour's state trace (_oracle/probe_tour.gd --trace).
+      const { installTrace } = await import('./dev/trace.js');
+      installTrace(this.tree, this.main, this.viewport, (node) => node instanceof Main.Autopilot, (line) => this.tour.log.push(line));
+    }
 
     this.watchWindow();
     if (this.params.has('stats')) this.stats.element = document.getElementById('chainmate-stats');
@@ -102,15 +165,46 @@ class App {
     requestAnimationFrame(this._frame);
   }
 
+  /**
+   * `?probe=stages`: the port's side of the render-stage oracle (dev/stage_probe.js), at the
+   * original's window size and a fixed step. What it produces is read by e2e/stages.mjs.
+   */
+  async startProbe() {
+    const [{ StageProbe }, oracle] = await Promise.all([
+      import('./dev/stage_probe.js'),
+      fetch('/_oracle/stages.json')
+        .then((response) => (response.ok ? response.json() : null))
+        .catch(() => null),
+    ]);
+    this.windowOverride = { ...TOUR_WINDOW };
+    this.fixedDelta = 1 / TOUR_FRAME_RATE;
+    this.fit();
+    this.probe = { entries: [], shots: [], done: false, oracle: oracle !== null };
+    go(new StageProbe(this, oracle).run(), 'probe:stages');
+  }
+
   /** The drawing buffer follows the window; the GUI canvas follows the drawing buffer. */
   fit() {
-    this.pipeline.resize(window.innerWidth, window.innerHeight, window.devicePixelRatio);
+    if (this.windowOverride) this.pipeline.resize(this.windowOverride.width, this.windowOverride.height, 1);
+    else this.pipeline.resize(window.innerWidth, window.innerHeight, window.devicePixelRatio);
     this.viewport.resize(this.pipeline.width, this.pipeline.height);
   }
 
   setUiScale(scale) {
     this.uiScale = scale;
     if (this.viewport) this.fit();
+  }
+
+  /**
+   * Android's Back button (native/android MainActivity asks through evaluateJavascript): the desktop
+   * game's Escape — close the open screen, drop the selection, pause — or 'exit' on the bare main
+   * menu, where Escape does nothing and the player wants out. Returns 'handled' | 'exit'.
+   */
+  backButton() {
+    if (this.state !== AppState.RUNNING || !this.main) return 'exit';
+    if (this.main.screen === Screen.MENU && !this.main._modal_open()) return 'exit';
+    this.input.tapKey(KEY.ESCAPE);
+    return 'handled';
   }
 
   /** Fullscreen needs a user gesture in a browser: a refusal is reported, never fatal. */
@@ -144,16 +238,31 @@ class App {
   frame(now) {
     if (this.state !== AppState.RUNNING) return;
     requestAnimationFrame(this._frame);
-    const delta = Math.min(Math.max(now - this.lastFrame, 0) / 1000, MAX_FRAME_DELTA);
+    try {
+      this.runFrame(now);
+      this.failedFrames = 0;
+    } catch (error) {
+      this.failedFrames += 1;
+      this.errors.push({ where: 'frame', message: String(error?.message ?? error) });
+      console.error(`frame ${this.pipeline?.stats.frame ?? '?'} failed:`, error);
+      if (this.failedFrames >= MAX_FAILED_FRAMES) this.fail(error, 'frame');
+    }
+  }
+
+  /** One frame: input, simulation, the 3D scene, the canvas. */
+  runFrame(now) {
+    const step = this.fixedDelta > 0 ? this.fixedDelta : Math.min(Math.max(now - this.lastFrame, 0) / 1000, MAX_FRAME_DELTA);
     this.lastFrame = now;
+    // Engine.time_scale scales what the frame simulates and what shaders read as TIME.
+    const delta = step * Engine.time_scale;
     this.shaderTime = (this.shaderTime + delta) % TIME_ROLLOVER;
     sharedUniforms.TIME.value = this.shaderTime;
 
     this.fit();
     this.input.poll();
-    this.tree.iteration(delta);
-    this.viewport.process(delta);
-    this.tree.preRender(delta);
+    this.tree.iteration(step, Engine.time_scale);
+    // Tooltip waits run on the unscaled clock (the engine's GUI timers ignore time_scale).
+    this.viewport.process(step);
 
     const { main, pipeline } = this;
     const camera = main.rig.camera.camera;
@@ -161,11 +270,13 @@ class App {
     camera.updateProjectionMatrix();
     main.object3d.updateMatrixWorld(true);
     camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
-    lighting.update(camera);
-    main.arena.key_light.syncShadowCaster();
-    this.sky.update(main.arena.sky);
+    // The engine's order: cull with the frame's camera, update the particle systems found in view
+    // (and the 3D texts), then draw.
+    this.renderView.frustum.setFromProjectionMatrix(this.renderView.viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    this.tree.preRender(delta, this.renderView);
     pipeline.render(camera, main.arena.environment);
-    this.canvasRenderer.render(this.tree.root, this.viewport.scale, pipeline.width, pipeline.height);
+    this.canvasRenderer.render(this.tree.root, this.viewport.stretch, this.viewport.oversampling, pipeline.width, pipeline.height, pipeline.screenTarget);
+    pipeline.present();
     this.tree.afterDraw();
     this.canvas.style.cursor = this.viewport.cursor;
     this.countFrame(now);
@@ -185,15 +296,20 @@ class App {
     stats.element.textContent = `${stats.fps} fps · ${drawCalls} draws · ${(triangles / 1000).toFixed(0)}k tris · ui ${ui.batches} batches ${ui.vertices} verts · ${this.pipeline.width}×${this.pipeline.height}`;
   }
 
-  fail(error) {
+  /** Stops the app for good and says so on the page. `where`: 'boot', or 'frame' when frames kept failing. */
+  fail(error, where = 'boot') {
     this.state = AppState.FAILED;
-    this.errors.push({ where: 'boot', message: String(error?.message ?? error) });
-    console.error('Chainmate could not start:', error);
-    const note = document.getElementById('chainmate-loading');
-    if (note) {
-      note.textContent = 'Chainmate could not start. Reload the page to try again.';
-      note.dataset.state = 'failed';
+    if (where === 'boot') this.errors.push({ where, message: String(error?.message ?? error) });
+    console.error(where === 'boot' ? 'Chainmate could not start:' : `Chainmate stopped after ${MAX_FAILED_FRAMES} failed frames:`, error);
+    // The loading note leaves once the game runs; a failure after that brings it back.
+    let note = document.getElementById('chainmate-loading');
+    if (!note) {
+      note = document.createElement('div');
+      note.id = 'chainmate-loading';
+      document.body.append(note);
     }
+    note.textContent = where === 'boot' ? 'Chainmate could not start. Reload the page to try again.' : 'Chainmate stopped. Reload the page to try again.';
+    note.dataset.state = 'failed';
   }
 }
 

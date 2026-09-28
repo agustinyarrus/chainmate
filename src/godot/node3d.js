@@ -134,13 +134,15 @@ export class Node3D extends Node {
   }
 }
 
-/** MeshInstance3D: `mesh` is a THREE.BufferGeometry, `material_override` a THREE material. */
+/**
+ * MeshInstance3D: `mesh` is a THREE.BufferGeometry, `material_override` a THREE material.
+ * `object3d.userData.castShadow` is GeometryInstance3D.cast_shadow: the render pipeline draws the
+ * mesh into the shadow atlas when it is on and the material is a caster.
+ */
 export class MeshInstance3D extends Node3D {
   constructor(name = '') {
     super(name, new THREE.Mesh(new THREE.BufferGeometry(), undefined));
-    this.object3d.castShadow = true;
-    this.object3d.receiveShadow = true;
-    this._castShadow = true;
+    this.object3d.userData.castShadow = true;
     this._ownsGeometry = false;
   }
   get mesh() {
@@ -161,21 +163,13 @@ export class MeshInstance3D extends Node3D {
   }
   set material_override(material) {
     this.object3d.material = material;
-    this._syncShadowFlags();
   }
   /** GeometryInstance3D.cast_shadow: true / false (SHADOW_CASTING_SETTING_ON / OFF). */
   set cast_shadow(on) {
-    this._castShadow = on;
-    this._syncShadowFlags();
+    this.object3d.userData.castShadow = Boolean(on);
   }
   get cast_shadow() {
-    return this._castShadow;
-  }
-  _syncShadowFlags() {
-    const material = this.object3d.material;
-    this.object3d.castShadow = this._castShadow && material?.castsShadow !== false;
-    this.object3d.receiveShadow = material?.receivesShadow !== false;
-    this.object3d.customDepthMaterial = material?.needsCustomDepth ? material.depthMaterial() : undefined;
+    return this.object3d.userData.castShadow;
   }
   _dispose() {
     super._dispose();
@@ -209,9 +203,7 @@ export class MultiMeshInstance3D extends Node3D {
     mesh.geometry = instanced;
     mesh.instanceMatrix.needsUpdate = true;
     mesh.computeBoundingSphere();
-    mesh.castShadow = material.castsShadow !== false;
-    mesh.receiveShadow = material.receivesShadow !== false;
-    if (material.needsCustomDepth) mesh.customDepthMaterial = material.depthMaterial();
+    mesh.userData.castShadow = true;
     this._instancedGeometry = instanced;
   }
   _dispose() {
@@ -220,16 +212,35 @@ export class MultiMeshInstance3D extends Node3D {
   }
 }
 
-/** OmniLight3D — registered with the lighting system while inside the tree. */
-export class OmniLight3D extends Node3D {
-  constructor() {
-    super('OmniLight3D');
+/**
+ * Light3D — scene/3d/light_3d.cpp: the parameters the renderer reads, with the engine's defaults.
+ * A light takes part in the frame while it is inside the tree and visible.
+ */
+export class Light3D extends Node3D {
+  constructor(name) {
+    super(name);
     this.light_color = Color.WHITE;
     this.light_energy = 1.0;
+    this.light_indirect_energy = 1.0;
+    this.light_volumetric_fog_energy = 1.0;
+    this.light_specular = 0.5;
+    this.light_negative = false;
+    /** PARAM_SIZE: the angular size of a directional light in degrees, the radius of an omni light. */
+    this.light_angular_distance = 0.0;
+    this.shadow_enabled = false;
+    this.shadow_bias = 0.1;
+    this.shadow_normal_bias = 1.0;
+    this.shadow_opacity = 1.0;
+    this.shadow_blur = 1.0;
+  }
+}
+
+/** OmniLight3D — registered with the lighting system while inside the tree. */
+export class OmniLight3D extends Light3D {
+  constructor() {
+    super('OmniLight3D');
     this.omni_range = 5.0;
     this.omni_attenuation = 1.0;
-    this.shadow_enabled = false;
-    this.light_volumetric_fog_energy = 1.0;
   }
   _enter_tree() {
     lighting.addOmni(this);
@@ -239,48 +250,30 @@ export class OmniLight3D extends Node3D {
   }
 }
 
-/**
- * DirectionalLight3D — shines along its local −Z. The key light also owns a THREE.DirectionalLight
- * used ONLY for three's shadow map (its colour/intensity never reach our shaders).
- */
-export class DirectionalLight3D extends Node3D {
+/** DirectionalLight3D::ShadowMode → number of PSSM splits. */
+export const DIRECTIONAL_SHADOW_SPLITS = Object.freeze({ orthogonal: 1, parallel_2_splits: 2, parallel_4_splits: 4 });
+
+/** DirectionalLight3D — shines along its local −Z; its shadow is drawn in cascades (shadows.js). */
+export class DirectionalLight3D extends Light3D {
   constructor() {
     super('DirectionalLight3D');
-    this.light_color = Color.WHITE;
-    this.light_energy = 1.0;
-    this.shadow_enabled = false;
-    this.light_volumetric_fog_energy = 1.0;
-    this.shadowCaster = null;
-  }
-  enableShadowCaster(mapSize, extent) {
-    const caster = new THREE.DirectionalLight(0xffffff, 0);
-    caster.castShadow = true;
-    caster.shadow.mapSize.set(mapSize, mapSize);
-    const cam = caster.shadow.camera;
-    cam.left = -extent;
-    cam.right = extent;
-    cam.top = extent;
-    cam.bottom = -extent;
-    cam.near = 0.5;
-    cam.far = 40;
-    this.shadowCaster = caster;
-    return caster;
+    this.light_specular = 1.0;
+    // Increased by the engine "to better suit most scenes".
+    this.shadow_normal_bias = 2.0;
+    this.directional_shadow_mode = 'parallel_4_splits';
+    this.directional_shadow_split_1 = 0.1;
+    this.directional_shadow_split_2 = 0.2;
+    this.directional_shadow_split_3 = 0.5;
+    this.directional_shadow_blend_splits = false;
+    this.directional_shadow_fade_start = 0.8;
+    this.directional_shadow_max_distance = 100.0;
+    this.directional_shadow_pancake_size = 20.0;
   }
   _enter_tree() {
     lighting.addDirectional(this);
   }
   _exit_tree() {
     lighting.removeDirectional(this);
-  }
-  /** Keeps the shadow caster aimed like this light (centred on `focus`). */
-  syncShadowCaster(focus = new THREE.Vector3()) {
-    if (!this.shadowCaster) return;
-    this.object3d.updateWorldMatrix(true, false);
-    tmpAxis.set(0, 0, 1).transformDirection(this.object3d.matrixWorld);
-    this.shadowCaster.position.copy(focus).addScaledVector(tmpAxis, 15);
-    this.shadowCaster.target.position.copy(focus);
-    this.shadowCaster.updateMatrixWorld();
-    this.shadowCaster.target.updateMatrixWorld();
   }
 }
 
@@ -366,47 +359,74 @@ export class Camera3D extends Node3D {
   }
 }
 
-/** Godot's Environment resource (the fields the arena drives). */
+/**
+ * Environment — scene/resources/environment.h: the properties the game sets and the renderer reads,
+ * with the engine's defaults (glow levels 2–4 on: 0.8, 0.4, 0.1).
+ */
 export class Environment {
   constructor() {
-    this.background_mode = 'sky';
+    this.background_mode = 'clear_color';
+    this.background_energy_multiplier = 1.0;
+    this.ambient_light_source = 'bg';
     this.ambient_light_color = new Color(0, 0, 0);
     this.ambient_light_energy = 1.0;
-    this.tonemap_mode = 'filmic';
+    this.ambient_light_sky_contribution = 1.0;
+    this.reflected_light_source = 'bg';
+    this.tonemap_mode = 'linear';
     this.tonemap_exposure = 1.0;
     this.tonemap_white = 1.0;
     this.glow_enabled = false;
-    this.glow_intensity = 0.8;
+    this.glow_levels = [0.0, 0.8, 0.4, 0.1, 0.0, 0.0, 0.0];
+    this.glow_normalized = false;
+    this.glow_intensity = 0.3;
     this.glow_strength = 1.0;
+    this.glow_mix = 0.05;
     this.glow_bloom = 0.0;
+    this.glow_blend_mode = 'screen';
     this.glow_hdr_threshold = 1.0;
     this.glow_hdr_scale = 2.0;
-    this.glow_blend_mode = 'softlight';
+    this.glow_hdr_luminance_cap = 12.0;
     this.ssao_enabled = false;
     this.ssao_radius = 1.0;
     this.ssao_intensity = 2.0;
     this.ssao_power = 1.5;
     this.ssao_detail = 0.5;
+    this.ssao_horizon = 0.06;
+    this.ssao_sharpness = 0.98;
+    this.ssao_light_affect = 0.0;
+    this.ssao_ao_channel_affect = 0.0;
     this.ssil_enabled = false;
     this.ssil_radius = 5.0;
     this.ssil_intensity = 1.0;
+    this.ssil_sharpness = 0.98;
+    this.ssil_normal_rejection = 1.0;
     this.fog_enabled = false;
+    this.fog_mode = 'exponential';
     this.fog_light_color = new Color(0.518, 0.553, 0.608);
     this.fog_light_energy = 1.0;
+    this.fog_sun_scatter = 0.0;
     this.fog_density = 0.01;
     this.fog_height = 0.0;
     this.fog_height_density = 0.0;
+    this.fog_aerial_perspective = 0.0;
     this.fog_sky_affect = 1.0;
     this.volumetric_fog_enabled = false;
     this.volumetric_fog_density = 0.05;
     this.volumetric_fog_albedo = new Color(1, 1, 1);
     this.volumetric_fog_emission = new Color(0, 0, 0);
+    this.volumetric_fog_emission_energy = 1.0;
     this.volumetric_fog_anisotropy = 0.2;
     this.volumetric_fog_length = 64.0;
+    this.volumetric_fog_detail_spread = 2.0;
+    this.volumetric_fog_gi_inject = 1.0;
+    this.volumetric_fog_ambient_inject = 0.0;
+    this.volumetric_fog_sky_affect = 1.0;
+    this.volumetric_fog_temporal_reprojection_enabled = true;
+    this.volumetric_fog_temporal_reprojection_amount = 0.9;
     this.adjustment_enabled = false;
+    this.adjustment_brightness = 1.0;
     this.adjustment_contrast = 1.0;
     this.adjustment_saturation = 1.0;
-    this.adjustment_brightness = 1.0;
     this.sky = null;
   }
 }

@@ -4,6 +4,7 @@
  */
 import { Vector2, Vector3, Color, Basis, Transform3D, TAU, PI } from '../godot/math.js';
 import { randf } from '../godot/rng.js';
+import { RenderingServer, RenderingMethod } from '../godot/os.js';
 import { Node3D, MeshInstance3D, OmniLight3D, MultiMeshInstance3D } from '../godot/node3d.js';
 import { SpatialMaterial, StandardMaterial3D } from '../godot/render/material.js';
 import { SurfaceTool, boxMesh, cylinderMesh, sphereMesh, torusMesh, quadMesh } from '../godot/render/primitives.js';
@@ -29,10 +30,17 @@ export class ArenaProps {
     return ArenaProps.standard('gold', new Color(0.86, 0.62, 0.28), 0.32, 1.0);
   }
 
-  /** Candle wax: rim light (Forward+ also adds screen-space subsurface scattering, not reproduced). */
+  /** Candle wax: rim light, and on Forward+ screen-space subsurface scattering. */
   static wax() {
     if (!materials.has('wax')) {
-      materials.set('wax', new StandardMaterial3D({ albedo_color: new Color(0.93, 0.86, 0.7), roughness: 0.55, rim_enabled: true, rim: 0.3 }));
+      materials.set('wax', new StandardMaterial3D({
+        albedo_color: new Color(0.93, 0.86, 0.7),
+        roughness: 0.55,
+        subsurf_scatter_enabled: RenderingServer.get_current_rendering_method() === RenderingMethod.FORWARD_PLUS,
+        subsurf_scatter_strength: 0.6,
+        rim_enabled: true,
+        rim: 0.3,
+      }));
     }
     return materials.get('wax');
   }

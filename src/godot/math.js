@@ -219,6 +219,11 @@ export class Vector4 {
 
 const HEX_DIGITS = /^#?([0-9a-fA-F]{3,8})$/;
 
+/** Color::get_r8 and friends: round(channel × 255) in single precision, clamped to a byte. O(1). */
+export function colorByte(channel) {
+  return Math.min(Math.max(Math.round(F(channel * 255)), 0), 255);
+}
+
 export class Color {
   /**
    * Color(r, g, b, a = 1) · Color("rrggbb[aa]") · Color(color, alpha)
@@ -525,6 +530,24 @@ export class Rect2 {
     return true;
   }
   get end() { return this.position.add(this.size); }
+}
+
+/** `AABB`: an axis-aligned box by its lowest corner and its size (single precision, like the engine's). */
+export class AABB {
+  constructor(position = Vector3.ZERO, size = Vector3.ZERO) {
+    this.position = position;
+    this.size = size;
+  }
+  get end() {
+    return this.position.add(this.size);
+  }
+  /** AABB::get_center — position + size × 0.5. */
+  get_center() {
+    return new Vector3(F(this.position.x + F(this.size.x * 0.5)), F(this.position.y + F(this.size.y * 0.5)), F(this.position.z + F(this.size.z * 0.5)));
+  }
+  has_volume() {
+    return this.size.x > 0 && this.size.y > 0 && this.size.z > 0;
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────── scalar helpers ──────

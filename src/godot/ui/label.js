@@ -5,7 +5,7 @@
  * horizontal positions (`int(size − line) / 2` for centring) and integer baselines.
  */
 import { Color } from '../math.js';
-import { Control, MOUSE_FILTER, HORIZONTAL_ALIGNMENT, VERTICAL_ALIGNMENT } from './control.js';
+import { Control, MOUSE_FILTER, SIZE, HORIZONTAL_ALIGNMENT, VERTICAL_ALIGNMENT } from './control.js';
 import { AUTOWRAP, Paragraph, autowrapFlags, lineRuns } from './text.js';
 
 export class Label extends Control {
@@ -14,6 +14,8 @@ export class Label extends Control {
   constructor(text = '') {
     super('Label');
     this.mouse_filter = MOUSE_FILTER.IGNORE;
+    // Label::Label(): a label keeps its own height and centres in the row it is given.
+    this.size_flags_vertical = SIZE.SHRINK_CENTER;
     this._text = text;
     this._hAlign = HORIZONTAL_ALIGNMENT.LEFT;
     this._vAlign = VERTICAL_ALIGNMENT.TOP;

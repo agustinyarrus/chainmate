@@ -41,7 +41,7 @@ export class DomInput {
     const rect = this.canvas.getBoundingClientRect();
     const px = ((e.clientX - rect.left) / Math.max(rect.width, 1)) * this.viewport.pixelSize.x;
     const py = ((e.clientY - rect.top) / Math.max(rect.height, 1)) * this.viewport.pixelSize.y;
-    return { x: px / this.viewport.scale, y: py / this.viewport.scale };
+    return { x: px / this.viewport.stretch.x, y: py / this.viewport.stretch.y };
   }
 
   _pointer(e, pressed) {
@@ -88,6 +88,13 @@ export class DomInput {
     const handled = this.viewport.push(event);
     // Keys the game consumes must not scroll the page or move browser focus.
     if (handled || ['Tab', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1'].includes(e.code)) e.preventDefault();
+  }
+
+  /** A key pressed and released at once, from outside the page (Android's Back arrives as Escape). */
+  tapKey(code) {
+    for (const pressed of [true, false]) {
+      this.viewport.push(new InputEvent('key', { code, keycode: code, physical_keycode: code, key: code, pressed, echo: false, shift: false, ctrl: false, alt: false }));
+    }
   }
 
   _releaseAll() {
