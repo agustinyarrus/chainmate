@@ -10,7 +10,15 @@
     "preview": "vite preview --host 127.0.0.1 --port 4190",
     "test": "node --test --test-reporter=spec \"test/*.test.mjs\"",
     "oracle": "node tools/oracle.mjs",
-    "tour": "node e2e/tour.mjs"
+    "tour": "node e2e/tour.mjs",
+    "stages": "node e2e/stages.mjs",
+    "perf": "node e2e/perf.mjs",
+    "audio": "node e2e/audio.mjs",
+    "capture-original": "pwsh -NoProfile -File tools/capture-original.ps1 -Modes full,arena,pieces,relics,menu",
+    "trace-compare": "node tools/trace-compare.mjs",
+    "apk": "node tools/apk.mjs",
+    "android-assets": "node tools/android-assets.mjs",
+    "android-smoke": "node tools/android-smoke.mjs"
   },
   "dependencies": {
     "fastnoise-lite": "^1.1.1",

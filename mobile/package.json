@@ -1,0 +1,22 @@
+{
+  "name": "chainmate-mobile",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Chainmate for Android: the web build inside Capacitor's WebView. The game itself has no native code; this is only the wrapper.",
+  "scripts": {
+    "apk": "node ../tools/apk.mjs",
+    "apk:release": "node ../tools/apk.mjs --release",
+    "aab": "node ../tools/apk.mjs --aab",
+    "run": "node ../tools/apk.mjs --install --run",
+    "assets": "node ../tools/android-assets.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.1",
+    "@capacitor/app": "^6.0.3",
+    "@capacitor/cli": "^6.2.1",
+    "@capacitor/core": "^6.2.1"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5"
+  }
+}

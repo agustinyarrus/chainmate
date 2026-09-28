@@ -1,0 +1,20 @@
+ext {
+    // WebGL2, AudioWorklet and ES2022 need a current WebView: Android 7 (API 24) onwards, like
+    // every phone that can draw the game at all.
+    minSdkVersion = 24
+    // Google Play requires targetSdk 36 (Android 16) for new releases. With 36 the system no longer
+    // calls onBackPressed: MainActivity registers an OnBackPressedCallback instead.
+    compileSdkVersion = 36
+    targetSdkVersion = 36
+    androidxActivityVersion = '1.8.0'
+    androidxAppCompatVersion = '1.6.1'
+    androidxCoordinatorLayoutVersion = '1.2.0'
+    androidxCoreVersion = '1.12.0'
+    androidxFragmentVersion = '1.6.2'
+    coreSplashScreenVersion = '1.0.1'
+    androidxWebkitVersion = '1.9.0'
+    junitVersion = '4.13.2'
+    androidxJunitVersion = '1.1.5'
+    androidxEspressoCoreVersion = '3.5.1'
+    cordovaAndroidVersion = '10.1.1'
+}

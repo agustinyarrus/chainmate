@@ -36,7 +36,7 @@ import { Fonts, loadFonts } from './presentation/ui/fonts.js';
 import { loadCredits } from './presentation/ui/screens.js';
 import { Main, Screen } from './presentation/main_scene.js';
 import { KEY } from './godot/input.js';
-import { OS, Engine } from './godot/os.js';
+import { OS, Engine, RenderingServer } from './godot/os.js';
 import { globalRng } from './godot/rng.js';
 
 /** A frame never simulates more than this (a hidden tab or a stall must not skip whole animations). */
@@ -143,6 +143,10 @@ class App {
     this.viewport = new GuiViewport(this.tree, { uiScale: () => this.uiScale });
     this.viewport.textInput = new TextInputBridge();
     this.input = new DomInput(this.canvas, this.viewport, { textInput: this.viewport.textInput });
+    // The capture tour drives the game itself (Viewport.push_input): the desktop's own mouse and keys
+    // must not reach it — a pointer crossing the visible test window would re-pick the hover — just
+    // as the original's captures drop the OS input (_oracle/probe_tour.gd).
+    if (OS.get_cmdline_user_args().includes('--capture')) this.input.enabled = false;
     Camera3D.viewportSize = () => this.viewport.size;
     this.fit();
 
@@ -205,6 +209,11 @@ class App {
     if (this.main.screen === Screen.MENU && !this.main._modal_open()) return 'exit';
     this.input.tapKey(KEY.ESCAPE);
     return 'handled';
+  }
+
+  /** Which renderer runs ('forward_plus' | 'mobile'): the Android smoke test checks a phone gets Mobile. */
+  get renderingMethod() {
+    return RenderingServer.get_current_rendering_method();
   }
 
   /** Fullscreen needs a user gesture in a browser: a refusal is reported, never fatal. */

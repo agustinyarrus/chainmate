@@ -1,0 +1,12 @@
+{
+  "appId": "com.agustinyarrus.chainmate",
+  "appName": "Chainmate",
+  "webDir": "../dist-android/www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "backgroundColor": "#07090dff",
+    "allowMixedContent": false
+  }
+}

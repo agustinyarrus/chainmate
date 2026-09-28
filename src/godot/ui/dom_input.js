@@ -107,6 +107,7 @@ export class DomInput {
 
   /** Gamepad buttons (standard mapping), once per frame. */
   poll() {
+    if (!this.enabled) return;
     const pads = navigator.getGamepads?.() ?? [];
     for (const pad of pads) {
       if (!pad || pad.mapping !== 'standard') continue;
