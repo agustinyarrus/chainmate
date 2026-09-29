@@ -28,14 +28,14 @@ está medida contra el ejecutable original, no a ojo.
 
 ---
 
-## Qué hicimos
+## Qué hice
 
 **1 · Un solo archivo.** Todo empezó con `Chainmate.exe`: 110 MB, Godot 4.7.2, sin el proyecto al
 lado. GDRE Tools recuperó lo que el ejecutable llevaba adentro (53 scripts, 57 recursos, escenas,
 shaders y fuentes), que quedó en `_original/` como referencia de lectura.
 
 **2 · La regla: nada a ojo.** Leer el código no alcanza para saber qué hace el motor con él. Así
-que el mismo `.exe`, parcheado con un solo gancho, se convirtió en un **oráculo**: le pasamos un
+que el mismo `.exe`, parcheado con un solo gancho, se convirtió en un **oráculo**: le paso un
 script GDScript (`_oracle/probe_*.gd`), lo corre adentro del motor de verdad y contesta en JSON.
 Hay más de veinte sondas: la partida completa paso a paso, cada malla, cada glifo, cada muestra de
 audio, el orden de cada `_process` y cada `await`, las etapas intermedias del render, el azar,
@@ -64,7 +64,7 @@ las partículas leídas de vuelta de la GPU. Los 258 tests del port se comparan 
   en un borde de paso.
 
 **4 · Las capturas.** El original trae su propio piloto automático, que juega un recorrido y se saca
-fotos. Lo volvimos determinista (cada cuadro dura 1/60 s, el azar global arranca de una semilla y
+fotos. Lo volví determinista (cada cuadro dura 1/60 s, el azar global arranca de una semilla y
 el teclado y el mouse del escritorio no le llegan) y el port corre exactamente el mismo piloto.
 Cada foto se compara con la del original.
 
