@@ -252,7 +252,8 @@ node tools/build-ftw.mjs             # el clang de Zig → src/godot/text/ftw.wa
 
 ## Licencias
 
-El contenido del juego (scripts, shaders, textos) viene del Chainmate original. El panel de créditos
+El juego y el port se publican bajo licencia **MIT** (`LICENSE`). El contenido del juego (scripts,
+shaders, textos) viene del Chainmate original, que está en `_original/`. El panel de créditos
 lleva cada aviso: Godot Engine (MIT), FreeType (FTL), HarfBuzz (MIT), Cinzel y Cormorant Garamond
 (SIL OFL 1.1, `public/fonts`), three.js (MIT), harfbuzzjs (MIT), FastNoiseLite (MIT);
 `tools/credits.mjs` junta las bibliotecas del port en `public/credits/port.json`.

@@ -2,6 +2,7 @@
   "name": "chainmate",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Chainmate — a native 3D chess roguelite. JavaScript + Three.js edition.",
   "type": "module",
   "scripts": {

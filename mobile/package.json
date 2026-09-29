@@ -1,6 +1,7 @@
 {
   "name": "chainmate-mobile",
   "private": true,
+  "license": "MIT",
   "version": "1.0.0",
   "description": "Chainmate for Android: the web build inside Capacitor's WebView. The game itself has no native code; this is only the wrapper.",
   "scripts": {
