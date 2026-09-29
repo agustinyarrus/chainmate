@@ -1,0 +1,56 @@
+{
+ "probe": "draws",
+ "generated": "2026-09-28T20:20:55.593Z",
+ "entries": [
+  {
+   "extra": {},
+   "first_draw": 1352667803,
+   "k": "nothing",
+   "next_after": 1352667803
+  },
+  {
+   "extra": {},
+   "first_draw": 1352667803,
+   "k": "RandomNumberGenerator",
+   "next_after": 1352667803
+  },
+  {
+   "extra": {
+    "seed": 3706616521
+   },
+   "first_draw": 1352667803,
+   "k": "GPUParticles3D",
+   "next_after": 2188350268
+  },
+  {
+   "extra": {},
+   "first_draw": 1352667803,
+   "k": "ParticleProcessMaterial",
+   "next_after": 1352667803
+  },
+  {
+   "extra": {},
+   "first_draw": 1352667803,
+   "k": "MeshInstance3D",
+   "next_after": 1352667803
+  },
+  {
+   "extra": {},
+   "first_draw": 1352667803,
+   "k": "OmniLight3D",
+   "next_after": 1352667803
+  },
+  {
+   "extra": {},
+   "first_draw": 1352667803,
+   "k": "Label3D",
+   "next_after": 1352667803
+  },
+  {
+   "extra": {},
+   "first_draw": 1352667803,
+   "k": "Timer",
+   "next_after": 1352667803
+  }
+ ]
+}

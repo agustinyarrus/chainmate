@@ -1,0 +1,196 @@
+{
+ "probe": "frame_order",
+ "generated": "2026-09-27T09:33:16.144Z",
+ "entries": [
+  {
+   "k": "note",
+   "f": -1,
+   "what": "process_frame"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "process 1"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "coroutine timer: start"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "coroutine frame: start"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "coroutine nested: start"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "inner: start"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "process tick 1 done"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "deferred from process"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "timer from process"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "second timer from process"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "coroutine timer: resumed"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "inner: resumed"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "coroutine nested: after inner"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "tween from process"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "tween from process finished"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "tween from timer"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "coroutine nested: after tween"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "victim freed (queued in process)"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "victim freed (queued in timer)"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "deferred from timer"
+  },
+  {
+   "k": "note",
+   "f": -1,
+   "what": "deferred from tween"
+  },
+  {
+   "k": "note",
+   "f": 0,
+   "what": "process_frame"
+  },
+  {
+   "k": "note",
+   "f": 0,
+   "what": "coroutine frame: resumed"
+  },
+  {
+   "k": "note",
+   "f": 0,
+   "what": "process 2"
+  },
+  {
+   "k": "note",
+   "f": 0,
+   "what": "timer from timer"
+  },
+  {
+   "k": "note",
+   "f": 0,
+   "what": "coroutine timer: resumed again"
+  },
+  {
+   "k": "note",
+   "f": 0,
+   "what": "timer from tween"
+  },
+  {
+   "k": "note",
+   "f": 0,
+   "what": "tween from tween"
+  },
+  {
+   "k": "note",
+   "f": 1,
+   "what": "process_frame"
+  },
+  {
+   "k": "note",
+   "f": 1,
+   "what": "process 3"
+  },
+  {
+   "k": "note",
+   "f": 2,
+   "what": "process_frame"
+  },
+  {
+   "k": "note",
+   "f": 2,
+   "what": "process 4"
+  },
+  {
+   "k": "note",
+   "f": 3,
+   "what": "process_frame"
+  },
+  {
+   "k": "note",
+   "f": 3,
+   "what": "process 5"
+  },
+  {
+   "k": "note",
+   "f": 4,
+   "what": "process_frame"
+  },
+  {
+   "k": "note",
+   "f": 4,
+   "what": "process 6"
+  },
+  {
+   "k": "note",
+   "f": 5,
+   "what": "process_frame"
+  },
+  {
+   "k": "note",
+   "f": 6,
+   "what": "process_frame"
+  }
+ ]
+}

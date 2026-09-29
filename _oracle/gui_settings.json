@@ -1,0 +1,12 @@
+{
+ "probe": "gui_settings",
+ "generated": "2026-09-28T19:15:18.855Z",
+ "entries": [
+  {
+   "display/window/subwindows/embed_subwindows": true,
+   "gui/common/drag_threshold": 10,
+   "gui/common/show_focus_state_on_pointer_event": 1,
+   "gui/timers/tooltip_delay_sec": 0.5
+  }
+ ]
+}

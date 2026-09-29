@@ -5,6 +5,7 @@ _oracle/*.out.txt
 _oracle/*.err.txt
 _ref/logs/
 e2e/shots/
+e2e/hud.local.mjs
 *.log
 
 _original/.godot/
@@ -14,7 +15,6 @@ _ref/arena/
 _ref/pieces/
 _ref/relics/
 _ref/menu/
-_oracle/*.json
 
 _ref/port/
 # Regenerated from the original build (tools/oracle.mjs stages, tools/capture-original.ps1)

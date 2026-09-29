@@ -131,7 +131,7 @@ func run(host: Node) -> void:
 		"window": [DisplayServer.window_get_size().x, DisplayServer.window_get_size().y],
 		"msaa_3d": _viewport.msaa_3d, "scaling_3d_scale": _viewport.scaling_3d_scale, "use_taa": _viewport.use_taa,
 		"use_debanding": _viewport.use_debanding, "screen_space_aa": _viewport.screen_space_aa,
-		"physics_ticks": Engine.physics_ticks_per_second, "max_fps": Engine.max_fps, "out": _out,
+		"physics_ticks": Engine.physics_ticks_per_second, "max_fps": Engine.max_fps, "out": _out.get_file(),
 		"project": _project_settings()})
 
 	# The opening of autopilot.gd's arena tour, call for call.

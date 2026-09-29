@@ -1,201 +1,258 @@
-# Chainmate — JavaScript + three.js edition
+<div align="center">
 
-A native 3D chess roguelite, ported from its shipped Godot 4.7.2 build to the web: plain
-JavaScript modules, three.js on WebGL2, no framework. The goal is not "a remake that looks close"
-but **the same game**: the same runs from the same seeds, the same frames, the same interface and
-the same sound — and every one of those claims is measured against the original executable.
+# Chainmate
+
+**Un roguelite de ajedrez en 3D, portado de su `.exe` de Godot 4.7.2 a JavaScript y three.js,
+y comparado contra el original píxel por píxel, muestra por muestra, número por número.**
+
+JavaScript · three.js · WebGL2 · WebAssembly · AudioWorklet · Android
+
+<img src="docs/menu.jpg" width="880" alt="El menú de Chainmate sobre la arena 3D">
+
+</div>
+
+La meta no fue «un remake que se parezca» sino **el mismo juego**: las mismas partidas con la misma
+semilla, los mismos cuadros, la misma interfaz y el mismo sonido. Y cada una de esas afirmaciones
+está medida contra el ejecutable original, no a ojo.
 
 ```
- original build (Godot 4.7.2, Forward+, Vulkan)            this port (WebGL2, three.js 0.186)
- ─────────────────────────────────────────────            ─────────────────────────────────────
- GDScript game logic          ──── bit-exact ────▶         src/core          (runs replay 1:1)
- SceneTree, coroutines, RNG   ──── bit-exact ────▶         src/godot         (frame order, PCG32)
- TextServerAdvanced + glyphs  ──── bit-exact ────▶         src/godot/text    (FreeType + HarfBuzz → wasm)
- Forward+ renderer            ──── ≤ 0.02/255 ───▶         src/godot/render  (pass by pass)
- GUI (Control, themes, input) ──── ≤ 0.6 % px ───▶         src/godot/ui + src/presentation/ui
- audio_synth.gd + mixer       ──── bit-exact ────▶         src/audio         (AudioWorklet)
+ el original (Godot 4.7.2, Forward+, Vulkan)                   este port (WebGL2, three.js 0.186)
+ ──────────────────────────────────────────                    ──────────────────────────────────
+ lógica del juego en GDScript   ──── bit a bit ────▶           src/core          (partidas 1:1)
+ SceneTree, corutinas, azar     ──── bit a bit ────▶           src/godot         (orden del cuadro, PCG32)
+ TextServerAdvanced + glifos    ──── bit a bit ────▶           src/godot/text    (FreeType + HarfBuzz → wasm)
+ renderer Forward+              ──── ≤ 0,02/255 ───▶           src/godot/render  (pase por pase)
+ partículas en GPU              ──── ≤ 2·10⁻⁶ ─────▶           src/godot/particles.js (en la CPU)
+ audio_synth.gd + mezclador     ──── bit a bit ────▶           src/audio         (AudioWorklet)
 ```
 
-## Running it
+---
+
+## Qué hicimos
+
+**1 · Un solo archivo.** Todo empezó con `Chainmate.exe`: 110 MB, Godot 4.7.2, sin el proyecto al
+lado. GDRE Tools recuperó lo que el ejecutable llevaba adentro (53 scripts, 57 recursos, escenas,
+shaders y fuentes), que quedó en `_original/` como referencia de lectura.
+
+**2 · La regla: nada a ojo.** Leer el código no alcanza para saber qué hace el motor con él. Así
+que el mismo `.exe`, parcheado con un solo gancho, se convirtió en un **oráculo**: le pasamos un
+script GDScript (`_oracle/probe_*.gd`), lo corre adentro del motor de verdad y contesta en JSON.
+Hay más de veinte sondas: la partida completa paso a paso, cada malla, cada glifo, cada muestra de
+audio, el orden de cada `_process` y cada `await`, las etapas intermedias del render, el azar,
+las partículas leídas de vuelta de la GPU. Los 258 tests del port se comparan contra esas respuestas.
+
+**3 · Capa por capa, hasta que coincida:**
+
+- **La lógica** (reglas de ajedrez, IA, mapa, encuentros, reliquias, mejoras, eventos): cinco
+  partidas enteras reproducidas acción por acción, con el estado completo del generador PCG
+  después de cada paso. Idénticas.
+- **El motor, en lo que el juego usa**: el orden exacto del cuadro del `SceneTree`, los `await` de
+  GDScript como generadores, PCG32 y `hash()`, la matemática de vectores en `float` de 32 bits
+  (que decide ramas como `size.x > size.z * 1.55` al armar la arena), `str(float)`, `sort_custom`.
+- **El texto**: FreeType 2.14.3 y HarfBuzz 14.2.0, las mismas versiones que trae Godot, compilados
+  a WebAssembly con el clang de Zig. Más de 28 000 glifos idénticos bit a bit.
+- **El render**: Forward+ desarmado pase por pase (sombras en cascada, SSAO, SSIL, niebla
+  volumétrica, dispersión subsuperficial, cielo, glow, tonemapping), cada efecto comparado solo,
+  contra los buffers intermedios del original. 88 imágenes por corrida.
+- **El sonido**: los 24 efectos y la música, sintetizados como lo hace `audio_synth.gd`, muestra
+  por muestra, y el mezclador del motor (buses, limitador) corriendo en un AudioWorklet.
+- **La interfaz**: `Control`, contenedores, temas, y el modelo de entrada de Godot 4.7 (qué queda
+  bajo el mouse, el foco oculto de un clic, la navegación con teclado).
+- **Las partículas**: el compute shader de `GPUParticles3D` corre en la CPU, en precisión simple,
+  en el mismo orden. Hasta el divisor de la GPU de referencia tuvo que copiarse: ahí `a / b` es
+  `a × rcp(b)` con 169 recíprocos que no redondean como deberían, y eso decide qué chispa renace
+  en un borde de paso.
+
+**4 · Las capturas.** El original trae su propio piloto automático, que juega un recorrido y se saca
+fotos. Lo volvimos determinista (cada cuadro dura 1/60 s, el azar global arranca de una semilla y
+el teclado y el mouse del escritorio no le llegan) y el port corre exactamente el mismo piloto.
+Cada foto se compara con la del original.
+
+**5 · El detective.** Cuando una foto no coincide, una **traza de estado** dice por qué antes de
+mirar píxeles: los dos programas imprimen las mismas líneas (cada valor sacado del azar global,
+qué control queda bajo el mouse y con qué rectángulo, el foco, los halos en cada foto) y
+`tools/trace-compare.mjs` ubica cada valor aleatorio en la **palabra exacta** del generador de la
+que salió. Así apareció, por ejemplo, que el `randf()` global de GDScript usa **una** palabra del
+generador y el `randf()` de un `RandomNumberGenerator` usa **dos**: esa diferencia desfasaba las
+banderas, las velas, el balanceo de cada pieza y las chispas de los halos. Corregida, casi todas las
+fotos pasaron de «muy cerca» a «coinciden».
+
+**6 · Android.** Un envoltorio de Capacitor lo lleva al teléfono: apaisado, pantalla completa, la
+pantalla no se apaga, el botón Atrás hace lo que Escape en la PC y Salir cierra la app. En el
+teléfono se elige solo el renderer Mobile, como hace Godot.
+
+<div align="center">
+
+<img src="docs/original-vs-port.jpg" width="880" alt="El .exe original a la izquierda y el port a la derecha, en la misma jugada">
+
+<sub>A la izquierda, el `.exe` original. A la derecha, el port en el navegador. Misma jugada, mismo cuadro.</sub>
+
+</div>
+
+---
+
+## Resultados
+
+Diferencia media absoluta sobre 255 y porcentaje de píxeles que se apartan más de 8 niveles. Una foto
+**coincide** si se aparta menos del 0,05 % de los píxeles, y está **muy cerca** si se aparta menos
+del 1 %:
+
+| Qué | Resultado |
+|---|---|
+| Recorrido completo, 3 actos, 39 fotos | 34 coinciden y 4 muy cerca (peor media 0,03, peor porcentaje 0,12 %); 14/14 chequeos del piloto. Una distinta: el mercader (ver abajo) |
+| Menú, arena, piezas y reliquias, 29 fotos | 29/29: 11 coinciden y 18 muy cerca (peor media 0,25: un primer plano del ejército de marfil con halos y chispas) |
+| Etapas del render, 6 cámaras | cuadros finales 0,006–0,016; cada efecto solo ≤ 0,12 |
+| Lógica | 5/5 partidas idénticas al original, estado por estado |
+| Audio | cada muestra idéntica; en un Chrome de verdad (sin sonido), 10/10: callado hasta el primer gesto, la música entra con su fundido, un efecto se oye encima, el bus Master silencia y vuelve |
+| Android (emulador API 36) | 7/7: instala, dibuja el menú sobre la arena 3D con el renderer Mobile, no se cae, Atrás y Salir se comportan |
+| Tiempo por cuadro, 1600×900, Intel Iris Xe | 39,5 · 44 · 39,5 ms en las tres arenas; el original en la misma máquina: 38,6 · 44,1 · 38,1 ms |
+
+<div align="center">
+
+<img src="docs/acto3.jpg" width="430" alt="Una batalla del tercer acto"> <img src="docs/piezas.jpg" width="430" alt="El ejército de marfil de cerca">
+
+<img src="docs/reliquias.jpg" width="430" alt="Las reliquias"> <img src="docs/android.jpg" width="430" alt="Chainmate en Android">
+
+</div>
+
+---
+
+## Lo que todavía difiere, y por qué
+
+- **El instante en que una pantalla entra al árbol.** Godot arma una pantalla nueva por etapas (el
+  tema le llega a cada control al entrar, `POST_ENTER_TREE` los redimensiona de abajo hacia arriba,
+  las etiquetas que parten línea se re-forman con el ancho que tengan en ese momento) y ordena los
+  contenedores recién al final del cuadro. El port llega exacto al diseño final, no a ese instante.
+  Se nota en una sola foto: en el mercader, un clic sintético que abre la pantalla y suelta en el
+  mismo cuadro deja resaltada una carta en el original y no en el port (medido con la traza: el
+  panel mide 1236 px antes de ordenarse en el original y 1203 en el port). Con un mouse de verdad,
+  el primer movimiento lo corrige.
+- **El prepass con multisampling.** WebGL2 no deja leer muestras sueltas: el prepass de
+  profundidad y normales que alimenta SSAO y SSIL se dibuja sin MSAA apuntando a la muestra 0 del
+  motor (0,07 % de píxeles distintos, en siluetas).
+- **Compute shaders.** La niebla volumétrica, SSAO, SSIL y el filtrado del cielo corren como pases
+  de fragmentos sobre los mismos buffers (los volúmenes, como atlas de rebanadas filtrados como
+  texturas 3D).
+- **El sonido arranca con el primer gesto**, como exigen los navegadores.
+- **Renderer Mobile.** En el teléfono el port aplica lo que el juego hace fuera de Forward+; no imita
+  el aspecto del renderer Mobile de Godot, con el que el original nunca salió.
+- **El precalentado de shaders de la versión web** corre en todas las plataformas (WebGL compila al
+  primer dibujo), pero por fuera del azar global: el `.exe` de escritorio no lo hace, así que lo que
+  sortea se devuelve y cada sorteo posterior queda igual al del original.
+
+---
+
+## Probarlo
 
 ```bash
 npm install
-npm run dev          # http://127.0.0.1:5190   (development server)
-npm run build        # → dist/                 (static files, deployable anywhere)
-npm run preview      # http://127.0.0.1:4190   (serves dist/)
+npm run dev          # http://127.0.0.1:5190   (servidor de desarrollo)
+npm run build        # → dist/                 (archivos estáticos, se sirven en cualquier lado)
+npm run preview      # http://127.0.0.1:4190   (sirve dist/)
 ```
 
-Query flags (the URL stands in for Godot's `-- --user-args`):
+Opciones por URL (hacen de los `-- --user-args` de Godot):
 
-| Flag | What it does |
+| Opción | Qué hace |
 |---|---|
-| `?capture` | the original's own scripted capture tour (`--capture`), with `menu`, `arena`, `pieces`, `relics` for the narrower tours |
-| `?seed=TEXT` | the run seed of the capture tour |
-| `?rngseed=N` | the engine-wide random stream starts from N (banner waves, candle flames, piece idles) instead of the clock |
-| `?fixed=60` | every frame simulates exactly 1/60 s |
-| `?renderer=mobile` | the frame a phone gets (Godot's Mobile renderer defaults: no SSAO, SSIL, volumetric fog or subsurface scattering); `forward_plus` forces the desktop one |
-| `?ephemeral` | settings and saves stay in memory |
-| `?app` | behave like the desktop build inside a tab (shows *Quit*) |
-| `?stats` | frame statistics in the corner |
-| `?probe=stages` | the port's side of the render-stage oracle (used by `npm run stages`) |
-| `?trace` | with `?capture`: the tour's state trace (`src/dev/trace.js`), compared line by line with the original's |
+| `?capture` | el recorrido de capturas del propio juego; con `menu`, `arena`, `pieces` o `relics`, los recorridos cortos |
+| `?seed=TEXTO` | la semilla de la partida del recorrido |
+| `?rngseed=N` | el azar global arranca de N en vez del reloj |
+| `?fixed=60` | cada cuadro simula exactamente 1/60 s |
+| `?renderer=mobile` | el cuadro que ve un teléfono; `forward_plus` fuerza el de escritorio |
+| `?ephemeral` | ajustes y partidas guardadas solo en memoria |
+| `?app` | se comporta como la versión de escritorio dentro de una pestaña (muestra *Quit*) |
+| `?stats` | estadísticas del cuadro en una esquina |
+| `?trace` | con `?capture`: la traza de estado del recorrido |
 
-On phones (Android, iOS) the Mobile renderer is chosen automatically, as Godot's
-`rendering_method.mobile` default does; the game itself then switches its Forward+-only effects off.
-
-## Layout
-
-```
-src/
-  core/           the game: chess rules, battles, AI, encounters, map, relics, upgrades, events, state
-  godot/          the parts of the engine the game relies on, ported from the 4.7.2 sources
-    scene.js        SceneTree: frame order, timers, deferred calls, unhandled input
-    coroutine.js    GDScript `await` as generators
-    rng.js          PCG32 (RandomPCG), the global Math:: functions and hash(), bit for bit
-    particles.js    GPUParticles3D: the engine's compute shader, stepped on the CPU draw for draw
-    gdscript.js     GDScript semantics: sort_custom, str(float), formatting, variant equality
-    render/         the Forward+ frame: materials, PSSM shadows, SSAO/SSIL, volumetric fog,
-                    subsurface scattering, sky radiance, glow, tone mapping
-    text/           FreeType (WebAssembly, native/ftw) + HarfBuzz shaping, glyph atlas
-    ui/             Control, containers, widgets, themes, canvas renderer, GUI input and focus
-  presentation/   the game's scenes: arena, board, pieces, relics, camera, effects, HUD and screens
-  audio/          audio_synth.gd and the engine's mixer (AudioWorklet, workers for synthesis)
-  autoload/       Settings, Profile, Sfx
-  dev/            development-only pages and probes (render stages, the tour's state trace)
-_oracle/          GDScript probes that run INSIDE the original build, and what they answered
-_ref/             reference captures of the original (regenerated, not committed)
-e2e/              browser checks: capture tours, render stages, frame cost, audio
-tools/            oracle runner, image comparison, CDP client, capture of the original, state-trace
-                  comparison, Android packaging
-native/ftw/       the C shim compiled with FreeType + HarfBuzz into src/godot/text/ftw.wasm
-mobile/           the Android wrapper (Capacitor 6): native project, icons, splash
-```
-
-## How exactness is proved
-
-**The oracle.** `_oracle/ChainmateOracle.exe` is the shipped game with one hook: given
-`-- --oracle=<probe.gd>` it runs that GDScript inside the real engine and prints JSON.
-`npm run oracle -- <name>` runs `_oracle/probe_<name>.gd` and stores `_oracle/<name>.json`; the
-unit tests then compare the port against those answers.
+**Android** (Capacitor 6, targetSdk 36):
 
 ```bash
-npm test                      # 258 tests, about 30 s, no browser
+cd mobile && npm install && cd ..
+node tools/android-assets.mjs       # íconos y splash desde public/icon.svg
+node tools/apk.mjs                  # → dist-android/Chainmate-<versión>-debug.apk
+node tools/apk.mjs --install --run  # al teléfono conectado (depuración USB)
+node tools/apk.mjs --aab            # el bundle firmado que pide Google Play (mobile/android/keystore.properties)
+node tools/android-smoke.mjs        # emulador: instala, abre y verifica que dibuje y responda
 ```
 
-| Suite | Against the original |
-|---|---|
-| `runs` | five whole runs (different seeds, armies, difficulties) replayed action by action: the complete game state, including the PCG state, after every step |
-| `rng`, `gdscript`, `math` | PCG32 streams, `hash()`, sort stability, float formatting, float32 vector math |
-| `global_random` | GDScript's global `randf()` (one word of the stream, `Math::randf`), `randf_range()` (three, in double), `randi_range()` — the word counts that keep every banner, flame, idle phase and particle seed in step |
-| `particles` | the two global draws of every `GPUParticles3D`, one-shot bookkeeping, and 120 frames of three systems whose particle boxes must be the ones the engine read back from the GPU (worst 2·10⁻⁶) |
-| `gradient_texture` | `GradientTexture2D` baked byte for byte: every fill (linear, radial, square, conic) × repeat mode |
-| `frame_order` | the order and frame of every `_process`, timer, tween, deferred call and `await` |
-| `text`, `glyphs` | font metrics at sizes 6–100, shaping glyph by glyph, 28 000+ glyph bitmaps bit for bit |
-| `meshes`, `relics`, `arena` | every procedural piece, relic and arena mesh, prop and light |
-| `audio` | every synthesised sample (float32 and PCM), the mixer from stream to limiter |
-| `render` | the renderer's arithmetic: shader variants per pass, fog volume, kernels |
-| `gui_input` | hover, focus, buttons and keyboard navigation as Godot 4.7 does them |
+---
 
-**The pictures.** The original captures itself with its own autopilot; the port runs the very same
-autopilot, and every image is compared pixel by pixel. References are captured deterministically
-(every frame 1/60 s, a seeded random stream), so what differs is the port, not the clock:
+## Cómo se verifica
 
 ```bash
-npm run capture-original      # the original's five tours → _ref/{tour,arena,pieces,relics,menu}
-npm run tour                  # the full 3-act tour in a visible Chrome → _ref/port/tour/report.html
-npm run tour -- arena         # or menu | pieces | relics
-npm run stages                # the 3D frame taken apart: 88 images of views and single effects
-npm run audio                 # the sound in a real browser, measured at the output (muted Chrome)
-npm run perf                  # where the frame time goes, pass by pass (GPU timer queries)
+npm test          # 258 tests, unos 30 s, sin navegador: el port contra las respuestas del oráculo
 ```
 
-**The state behind the pictures.** When a shot differs, the trace says why before anyone squints at
-pixels. Both builds print the same lines — every holder of a draw of the global random stream (cloth
-phases, flame seeds, particle seeds, piece idle phases), every change of the hovered control and of
-the focus owner, every control the mouse enters with its rect at that instant, and the halos at each
-shot — and `tools/trace-compare.mjs` places each random fingerprint at the word of the seeded stream
-it came from, so the first draw either build makes differently is named, not guessed:
+Las respuestas del oráculo (`_oracle/*.json`) están en el repositorio, así que los tests corren en
+cualquier clon. Regenerarlas, capturar las fotos del original o correr la traza necesita el
+`Chainmate.exe` original:
 
 ```bash
+npm run oracle -- <sonda>           # corre _oracle/probe_<sonda>.gd adentro del original
+npm run capture-original            # las fotos de referencia del original → _ref/
+npm run tour                        # el recorrido completo en un Chrome visible → _ref/port/tour/report.html
+npm run tour -- arena               # o menu | pieces | relics
+npm run stages                      # el render desarmado: 88 imágenes de vistas y efectos sueltos
+npm run audio                       # el sonido en un navegador real, medido a la salida
 pwsh -File tools/capture-original.ps1 -Modes full -Acts 1 -Trace -RefRoot _ref/trace
 npm run tour -- --acts 1 --trace
 node tools/trace-compare.mjs --original _ref/trace/logs/full.out.txt --port _ref/port/tour/trace.txt
 ```
 
-Last measurements (mean absolute difference over 255, share of pixels off by more than 8):
-
-| Check | Result |
+| Suite | Contra el original |
 |---|---|
-| Full tour, 3 acts, 39 screenshots | 34 *match* and 4 *close* (worst mean 0.03, worst share 0.12 %); 14/14 scripted checks pass. One *different*: the merchant, a hover left by the instant a screen enters the tree (see below) |
-| Menu, arena, pieces and relics tours, 29 screenshots | 29/29: 11 *match*, 18 *close*; worst mean 0.25, worst share 0.50 % (a close-up of the ivory army, halos and sparks included) |
-| Render stages, 6 camera stops × views and ablations | final frames 0.006–0.016; every effect alone (shadows, SSAO, SSIL, fog, volumetric fog, glow, grading, each light) ≤ 0.12 |
-| Game logic | 5/5 runs identical to the original, state by state |
-| Audio | every sample identical (unit tests); in a real Chrome (muted, real autoplay policy) 10/10: silent until a gesture, the music fades in, an effect is heard over it, the Master bus mutes and restores |
-| Android, API 36 emulator | 7/7: installs, draws the menu over the 3D arena with the Mobile renderer, survives, logs no crash, Back and Quit behave |
-| Frame time, 1600×900, Intel Iris Xe | outpost 39.5 ms · crypt 44 ms · court 39.5 ms — the original on the same machine: 38.6 · 44.1 · 38.1 ms |
+| `runs` | cinco partidas enteras (semillas, ejércitos y dificultades distintas), acción por acción, con el estado del generador |
+| `rng`, `gdscript`, `math` | flujos PCG32, `hash()`, estabilidad del orden, formato de números, vectores en float32 |
+| `global_random` | `randf()` global (una palabra), `randf_range()` (tres, en doble precisión), `randi_range()` |
+| `particles` | los dos sorteos de cada `GPUParticles3D` y 120 cuadros de tres sistemas contra lo que la GPU devolvió (peor 2·10⁻⁶) |
+| `gradient_texture` | `GradientTexture2D` byte por byte, en cada modo de relleno y repetición |
+| `frame_order` | el orden y el cuadro de cada `_process`, temporizador, tween, llamada diferida y `await` |
+| `text`, `glyphs` | métricas de fuentes de 6 a 100 px, shaping glifo por glifo, 28 000+ mapas de bits |
+| `meshes`, `relics`, `arena` | cada malla procedural de piezas, reliquias y arena, cada adorno y cada luz |
+| `audio` | cada muestra sintetizada (float32 y PCM) y el mezclador de punta a punta |
+| `render` | la aritmética del renderer: variantes de shader por pase, el volumen de niebla, los kernels |
+| `gui_input` | hover, foco, botones y navegación con teclado como en Godot 4.7 |
 
-## What is approximated, and why
+---
 
-- **Multisampled prepass.** WebGL2 cannot read single samples; the depth/normal prepass that feeds
-  SSAO and SSIL is drawn without MSAA and aimed at the engine's sample 0, shading at the pixel
-  centre as multisampling does. Normal buffer: 0.07 % of pixels off, on silhouettes.
-- **Compute shaders.** The volumetric fog, SSAO, SSIL and sky filtering run as fragment passes over
-  the engine's buffers (volumes as atlases of slices, filtered like 3D textures); results match the
-  engine's within the numbers above.
-- **Light culling for shadow casters** (`RenderingLightCuller`) is not ported: it only changes which
-  casters reach the far cascades' atlas debug view, never the frame.
-- **Sound starts on the first gesture**, as browsers require; a sound asked for in the gesture that
-  unlocks the audio is kept a quarter of a second.
-- **Mobile renderer.** On phones the port applies what the game itself does outside Forward+; it
-  does not reproduce the look of Godot's Mobile renderer, which the original never shipped with.
-- **GUI features the game never uses** (explicit focus-neighbour paths, drag and drop, scroll
-  containers that follow the focus) are not ported.
-- **The instant a screen enters the tree.** Godot lays a new screen out in stages — the theme
-  reaches each control as it enters, `POST_ENTER_TREE` resizes them bottom-up, minimum sizes are
-  cached and invalidated upward only while valid, wrapping labels reshape against whatever width
-  they have at that moment — and sorts containers at the end of the frame. The port gets the
-  sorted layout exactly, not that instant: a click whose press opens a screen and whose release
-  lands in the same frame can hover a different control. The tour's merchant (`24_stop_merchant`)
-  shows it: at the release the original's panel is 1236 px tall before sorting, the port's 1203,
-  so the stacked cards differ and one card keeps its hover highlight in the original only
-  (measured with the state trace; any mouse movement re-picks it).
-- **The web export's shader warm-up** runs on every platform here (WebGL compiles on first draw),
-  but outside the global random stream: the shipped desktop build never builds those props, so
-  their draws are handed back and every later draw stays the original's.
-- **Particles** are GPU-simulated in the original; here the same compute shader runs on the CPU in
-  single precision, including the reference GPU's divider (a / b = a × rcp(b), 169 reciprocals that
-  differ from the correctly rounded ones, measured), which decides the particle that restarts on a
-  step boundary.
+## Estructura
 
-## Android
-
-`mobile/` wraps the web build with Capacitor 6 (landscape, immersive, screen kept on; the system Back
-button is the desktop game's Escape, and leaves the app from the bare main menu):
-
-```bash
-cd mobile && npm install && cd ..
-node tools/android-assets.mjs       # icons and splash from public/icon.svg (adaptive safe zone)
-node tools/apk.mjs                  # → dist-android/Chainmate-<version>-debug.apk
-node tools/apk.mjs --aab            # → the signed bundle Google Play takes (mobile/android/keystore.properties)
-node tools/android-smoke.mjs        # boots the emulator, installs, opens, checks it draws and survives
+```
+src/
+  core/           el juego: reglas, batallas, IA, encuentros, mapa, reliquias, mejoras, eventos, estado
+  godot/          las partes del motor que el juego usa, portadas desde las fuentes de 4.7.2
+    scene.js        SceneTree: orden del cuadro, temporizadores, llamadas diferidas, entrada
+    coroutine.js    los `await` de GDScript como generadores
+    rng.js          PCG32, las funciones globales de Math:: y hash(), bit a bit
+    particles.js    GPUParticles3D: el compute shader del motor, paso a paso en la CPU
+    render/         el cuadro Forward+: materiales, sombras, SSAO/SSIL, niebla volumétrica, SSS, cielo, glow
+    text/           FreeType (WebAssembly) + HarfBuzz, atlas de glifos
+    ui/             Control, contenedores, widgets, temas, renderer 2D, entrada y foco
+  presentation/   las escenas del juego: arena, tablero, piezas, reliquias, cámara, efectos, HUD, pantallas
+  audio/          audio_synth.gd y el mezclador del motor (AudioWorklet, síntesis en workers)
+  autoload/       Settings, Profile, Sfx
+  dev/            sondas del lado del port (etapas del render, traza de estado)
+_original/        el proyecto que se recuperó del .exe (solo lectura)
+_oracle/          las sondas que corren adentro del original, y lo que contestaron
+e2e/              chequeos en el navegador: recorridos, etapas del render, costo del cuadro, audio
+tools/            oráculo, comparación de imágenes, cliente CDP, capturas del original, traza, Android
+native/ftw/       el puente en C que se compila con FreeType + HarfBuzz a src/godot/text/ftw.wasm
+mobile/           el envoltorio de Android (Capacitor 6)
 ```
 
-On phones the Mobile renderer is chosen automatically (see the flags above); targetSdk is 36, what
-Google Play requires for new releases.
-
-## Rebuilding the native parts
-
-`src/godot/text/ftw.wasm` is committed. To rebuild it (FreeType 2.14.3 and HarfBuzz 14.2.0 exactly
-as Godot 4.7.2 vendors them):
+`src/godot/text/ftw.wasm` está en el repositorio. Para reconstruirlo:
 
 ```bash
-python tools/fetch-godot-src.py      # engine sources → _build/godot-src (not committed)
-node tools/build-ftw.mjs             # Zig's clang → src/godot/text/ftw.wasm
+python tools/fetch-godot-src.py      # fuentes del motor → _build/godot-src
+node tools/build-ftw.mjs             # el clang de Zig → src/godot/text/ftw.wasm
 ```
 
-## Licences
+---
 
-The game content (scripts, shaders, texts) comes from the original Chainmate build. The Credits
-panel carries every notice: Godot Engine (MIT), FreeType (FTL), HarfBuzz (MIT), Cinzel and Cormorant
-Garamond (SIL OFL 1.1, `public/fonts`), three.js (MIT), harfbuzzjs (MIT), FastNoiseLite (MIT) —
-`tools/credits.mjs` collects the port's own libraries into `public/credits/port.json`.
+## Licencias
+
+El contenido del juego (scripts, shaders, textos) viene del Chainmate original. El panel de créditos
+lleva cada aviso: Godot Engine (MIT), FreeType (FTL), HarfBuzz (MIT), Cinzel y Cormorant Garamond
+(SIL OFL 1.1, `public/fonts`), three.js (MIT), harfbuzzjs (MIT), FastNoiseLite (MIT);
+`tools/credits.mjs` junta las bibliotecas del port en `public/credits/port.json`.

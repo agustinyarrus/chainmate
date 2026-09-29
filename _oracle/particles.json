@@ -1,0 +1,27 @@
+{
+ "probe": "particles",
+ "generated": "2026-09-28T20:18:46.159Z",
+ "entries": [
+  {
+   "draw": 1352667803,
+   "k": "new",
+   "next_global": 2188350268,
+   "seed": 3706616521
+  },
+  {
+   "emitting_after_set": true,
+   "k": "burst",
+   "seed_changed": false
+  },
+  {
+   "emitting": false,
+   "finished": false,
+   "k": "burst_later"
+  },
+  {
+   "finished": true,
+   "k": "restarted",
+   "seed_changed": true
+  }
+ ]
+}
