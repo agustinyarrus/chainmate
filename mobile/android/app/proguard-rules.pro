@@ -1,21 +1,4 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
-
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
-
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Chainmate's release build does not shrink or obfuscate (minifyEnabled false in build.gradle): the
+# app is Capacitor's bridge plus the game's web files, and R8 would only risk the classes Capacitor
+# finds by reflection. Rules would go here if minification is ever turned on; the bridge's own
+# rules ship with the capacitor-android library.
